@@ -1,0 +1,27 @@
+version: '3.8'
+
+# Production Docker Compose configuration
+# Use this for deploying with Docker Hub image
+
+services:
+  youtube-summarizer:
+    image: yourusername/youtube-summarizer:latest
+    container_name: youtube-summarizer
+    restart: always
+    stdin_open: true
+    tty: true
+    volumes:
+      - ./data:/data
+    env_file:
+      - .env
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sys; sys.exit(0)"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+# Usage:
+# 1. Download this file
+# 2. Create .env from .env.example
+# 3. docker compose -f docker-compose.prod.yml up -d

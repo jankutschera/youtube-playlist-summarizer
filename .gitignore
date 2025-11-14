@@ -1,0 +1,35 @@
+# Environment files
+.env
+.env.local
+
+# OAuth credentials and tokens
+data/credentials.json
+data/token.pickle
+data/processed_videos.json
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+
+# Docker
+.dockerignore
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log

@@ -1,0 +1,40 @@
+version: '3.8'
+
+services:
+  youtube-summarizer:
+    build: .
+    container_name: youtube-summarizer
+    restart: always  # Startet automatisch beim System-Start
+    stdin_open: true
+    tty: true
+    volumes:
+      - ./data:/data  # Speichert OAuth Token und verarbeitete Videos
+    environment:
+      # Claude API
+      - CLAUDE_API_KEY=${CLAUDE_API_KEY}
+
+      # Email Einstellungen
+      - EMAIL_FROM=${EMAIL_FROM}
+      - EMAIL_TO=${EMAIL_TO}
+      - EMAIL_PASSWORD=${EMAIL_PASSWORD}
+
+      # SMTP Server (Gmail)
+      - SMTP_SERVER=smtp.gmail.com
+      - SMTP_PORT=587
+
+      # Prüfintervall in Minuten
+      - CHECK_INTERVAL_MINUTES=${CHECK_INTERVAL_MINUTES:-30}
+
+      # YouTube Playlist ID
+      - PLAYLIST_ID=${PLAYLIST_ID}
+
+      # RapidAPI Key für YouTube Transkripte
+      - RAPIDAPI_KEY=${RAPIDAPI_KEY}
+
+    # Health check um sicherzustellen dass Container läuft
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sys; sys.exit(0)"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
