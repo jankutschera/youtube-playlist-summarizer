@@ -293,6 +293,29 @@ class YouTubeSummarizer:
             traceback.print_exc()
             return None
     
+    def calculate_max_tokens(self, title):
+        """Berechne max_tokens dynamisch basierend auf Titel"""
+        import re
+
+        # Suche nach Zahlen im Titel (z.B. "17 Hacks", "25 Tips")
+        numbers = re.findall(r'\b(\d+)\b', title)
+
+        if numbers:
+            max_num = max([int(n) for n in numbers])
+
+            # Dynamische Anpassung:
+            if max_num >= 25:
+                return 10000  # Für "25+ Tips/Hacks"
+            elif max_num >= 20:
+                return 8000   # Für "20-24 Tips"
+            elif max_num >= 15:
+                return 6000   # Für "15-19 Tips"
+            elif max_num >= 10:
+                return 5000   # Für "10-14 Tips"
+
+        # Standard für Videos ohne große Listen
+        return 4000
+
     def summarize_with_claude(self, title, transcript):
         """Create summary using Claude"""
         prompt = f"""Bitte erstelle eine Zusammenfassung dieses YouTube-Videos für eine Email.
@@ -354,10 +377,14 @@ Die Strategien zeigen, dass kleine Änderungen große Wirkung haben können...
 ================================="""
 
         try:
+            # Dynamische Token-Berechnung basierend auf Titel
+            max_tokens = self.calculate_max_tokens(title)
+            print(f"🎯 Max Tokens für '{title}': {max_tokens}")
+
             # Nutze Claude Sonnet 4.5 (neueste Version)
             message = self.claude_client.messages.create(
                 model="claude-sonnet-4-20250514",  # Claude Sonnet 4.5
-                max_tokens=4000,  # Erhöht für Listen mit vielen Punkten (z.B. "25 Tricks")
+                max_tokens=max_tokens,
                 messages=[
                     {"role": "user", "content": prompt}
                 ]
@@ -368,9 +395,10 @@ Die Strategien zeigen, dass kleine Änderungen große Wirkung haben können...
             # Fallback: Versuche mit dem "latest" Alias
             try:
                 print("🔄 Versuche mit 'claude-sonnet-4-latest'...")
+                max_tokens = self.calculate_max_tokens(title)
                 message = self.claude_client.messages.create(
                     model="claude-sonnet-4-latest",
-                    max_tokens=4000,  # Erhöht für Listen mit vielen Punkten
+                    max_tokens=max_tokens,
                     messages=[
                         {"role": "user", "content": prompt}
                     ]
