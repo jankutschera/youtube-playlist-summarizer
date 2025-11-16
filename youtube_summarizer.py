@@ -137,20 +137,31 @@ class YouTubeSummarizer:
             print(f"🔍 Versuche Playlist abzurufen...")
             print(f"🔍 Verwende Playlist ID: {self.playlist_id}")
 
-            # Get the playlist items
-            request = self.youtube.playlistItems().list(
-                part='snippet,contentDetails',
-                playlistId=self.playlist_id,
-                maxResults=50  # Erhöht auf 50 um mehr Videos zu prüfen
-            )
-            response = request.execute()
+            # Get ALL playlist items with pagination
+            all_items = []
+            next_page_token = None
+
+            while True:
+                request = self.youtube.playlistItems().list(
+                    part='snippet,contentDetails',
+                    playlistId=self.playlist_id,
+                    maxResults=50,
+                    pageToken=next_page_token
+                )
+                response = request.execute()
+
+                all_items.extend(response.get('items', []))
+                next_page_token = response.get('nextPageToken')
+
+                if not next_page_token:
+                    break
 
             print(f"🔍 API Response erhalten. Keys: {list(response.keys())}")
             print(f"🔍 Total Results: {response.get('pageInfo', {}).get('totalResults', 'unknown')}")
-            print(f"🔍 Results Per Page: {response.get('pageInfo', {}).get('resultsPerPage', 'unknown')}")
+            print(f"🔍 Total Videos geholt mit Pagination: {len(all_items)}")
 
             videos = []
-            items = response.get('items', [])
+            items = all_items
             print(f"🔍 Items in Response: {len(items)}")
 
             for item in items:
@@ -318,6 +329,31 @@ class YouTubeSummarizer:
 
     def summarize_with_claude(self, title, transcript):
         """Create summary using Claude"""
+        import re
+
+        # Extrahiere Zahlen aus dem Titel um zu prüfen ob es ein Listen-Video ist
+        numbers = re.findall(r'\b(\d+)\b', title)
+        is_list_video = False
+        required_points = 0
+
+        if numbers:
+            # Nimm die größte Zahl (meist die Anzahl der Tipps/Hacks)
+            max_num = max([int(n) for n in numbers])
+            # Nur Zahlen zwischen 5 und 100 zählen als Listen
+            if 5 <= max_num <= 100:
+                is_list_video = True
+                required_points = max_num
+
+        # Baue spezielle Instruktion für Listen-Videos
+        list_instruction = ""
+        if is_list_video:
+            list_instruction = f"""
+⚠️ KRITISCH: Dieses Video ist ein Listen-Video mit {required_points} Punkten!
+Du MUSST unter KERNPUNKTE genau {required_points} Punkte auflisten - NICHT WENIGER!
+Zähle die Punkte von 1 bis {required_points}.
+Wenn du weniger als {required_points} Punkte auflistest, ist die Zusammenfassung UNVOLLSTÄNDIG und FALSCH!
+"""
+
         prompt = f"""Bitte erstelle eine Zusammenfassung dieses YouTube-Videos für eine Email.
 
 Video-Titel: {title}
@@ -330,11 +366,7 @@ Nutze nur einfache Textformatierung:
 - Für Überschriften: GROSSBUCHSTABEN und Leerzeilen
 - Für Listen: Einfache Bindestriche (-)
 - Keine #, **, *, ~~, etc.
-
-SPEZIELLE ANWEISUNG FÜR LISTEN-VIDEOS:
-Wenn der Video-Titel eine Aufzählung ankündigt (z.B. "10 Tipps", "25 Tricks", "7 Wege", etc.),
-dann liste ALLE angekündigten Punkte unter KERNPUNKTE auf - nicht nur 5-7!
-Beispiel: Bei "25 Marketing Tricks" müssen alle 25 Tricks einzeln aufgelistet werden.
+{list_instruction}
 
 Erstelle eine Zusammenfassung mit:
 
@@ -347,12 +379,9 @@ Erstelle eine Zusammenfassung mit:
    → Kontext und Hintergrund ausführlicher erklären
    → Warum ist dieses Thema relevant?
 
-3. KERNPUNKTE
-   → Bei Listen-Videos (z.B. "10 Tipps"): ALLE angekündigten Punkte auflisten!
-   → Bei anderen Videos: Die 5-7 wichtigsten Erkenntnisse, Tipps oder Argumente
+3. KERNPUNKTE{f"   → Dies ist ein Listen-Video! Du musst ALLE {required_points} Punkte einzeln auflisten (1. bis {required_points}.)!" if is_list_video else "   → Bei Listen-Videos: ALLE Punkte! Bei normalen Videos: 5-7 Hauptpunkte"}
    → Jeder Punkt 1-2 Sätze mit Details
-   → Nutze einfache Bindestriche (-) statt Bullet Points
-   → Verwende Nummerierung (1., 2., 3., ...) wenn es eine Liste ist
+   → Verwende Nummerierung (1., 2., 3., ...)
 
 4. FAZIT (2-3 Sätze)
    → Zusammenfassung und praktische Relevanz
