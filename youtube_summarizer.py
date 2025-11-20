@@ -405,37 +405,57 @@ FAZIT
 Die Strategien zeigen, dass kleine Änderungen große Wirkung haben können...
 ================================="""
 
-        try:
-            # Dynamische Token-Berechnung basierend auf Titel
-            max_tokens = self.calculate_max_tokens(title)
-            print(f"🎯 Max Tokens für '{title}': {max_tokens}")
+        import time
 
-            # Nutze Claude Sonnet 4.5 (neueste Version)
-            message = self.claude_client.messages.create(
-                model="claude-sonnet-4-20250514",  # Claude Sonnet 4.5
-                max_tokens=max_tokens,
-                messages=[
-                    {"role": "user", "content": prompt}
-                ]
-            )
-            return message.content[0].text
-        except Exception as e:
-            print(f"❌ Fehler bei Claude Sonnet 4: {e}")
-            # Fallback: Versuche mit dem "latest" Alias
+        # Dynamische Token-Berechnung basierend auf Titel
+        max_tokens = self.calculate_max_tokens(title)
+        print(f"🎯 Max Tokens für '{title}': {max_tokens}")
+
+        # Retry-Logik mit exponential backoff für Overloaded Errors
+        max_retries = 3
+        base_delay = 10  # Sekunden
+
+        for attempt in range(max_retries):
             try:
-                print("🔄 Versuche mit 'claude-sonnet-4-latest'...")
-                max_tokens = self.calculate_max_tokens(title)
+                # Nutze Claude Sonnet 4.5 (neueste Version)
                 message = self.claude_client.messages.create(
-                    model="claude-sonnet-4-latest",
+                    model="claude-sonnet-4-20250514",  # Claude Sonnet 4.5
                     max_tokens=max_tokens,
                     messages=[
                         {"role": "user", "content": prompt}
                     ]
                 )
                 return message.content[0].text
-            except Exception as e2:
-                print(f"❌ Fallback fehlgeschlagen: {e2}")
-                return f"Zusammenfassung konnte nicht erstellt werden. API Fehler: {e}"
+
+            except Exception as e:
+                error_str = str(e)
+
+                # Check if it's an overloaded error (529)
+                if "overloaded" in error_str.lower() or "529" in error_str:
+                    if attempt < max_retries - 1:
+                        wait_time = base_delay * (2 ** attempt)  # Exponential backoff
+                        print(f"⚠️ Claude API überlastet (529). Warte {wait_time} Sekunden vor Retry {attempt + 1}/{max_retries}...")
+                        time.sleep(wait_time)
+                        continue
+                    else:
+                        print(f"❌ Claude API überlastet nach {max_retries} Versuchen")
+                        return f"Zusammenfassung konnte nicht erstellt werden. Claude API ist überlastet. Bitte später erneut versuchen."
+
+                # For other errors, try fallback model
+                print(f"❌ Fehler bei Claude Sonnet 4: {e}")
+                try:
+                    print("🔄 Versuche mit 'claude-sonnet-4-latest'...")
+                    message = self.claude_client.messages.create(
+                        model="claude-sonnet-4-latest",
+                        max_tokens=max_tokens,
+                        messages=[
+                            {"role": "user", "content": prompt}
+                        ]
+                    )
+                    return message.content[0].text
+                except Exception as e2:
+                    print(f"❌ Fallback fehlgeschlagen: {e2}")
+                    return f"Zusammenfassung konnte nicht erstellt werden. API Fehler: {e}"
     
     def is_recently_added(self, added_at_str, days=7):
         """Check if video was added to playlist within the last N days"""
@@ -602,8 +622,8 @@ Die Strategien zeigen, dass kleine Änderungen große Wirkung haben können...
                 self.save_state()
 
             # Delay between videos to avoid rate limiting
-            print("⏳ Warte 30 Sekunden um Rate Limiting zu vermeiden...")
-            time.sleep(30)
+            print("⏳ Warte 45 Sekunden um Rate Limiting zu vermeiden...")
+            time.sleep(45)  # Erhöht auf 45s um API-Überlastung zu vermeiden
     
     def run(self):
         """Main run loop"""
