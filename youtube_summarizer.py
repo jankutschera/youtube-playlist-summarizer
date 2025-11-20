@@ -328,7 +328,13 @@ class YouTubeSummarizer:
         return 4000
 
     def summarize_with_claude(self, title, transcript):
-        """Create summary using Claude"""
+        """Create summary using Claude
+
+        Returns:
+            tuple: (success: bool, summary: str)
+                - success: True if summarization succeeded, False if it failed
+                - summary: The summary text (or error message if failed)
+        """
         import re
 
         # Extrahiere Zahlen aus dem Titel um zu prüfen ob es ein Listen-Video ist
@@ -425,7 +431,7 @@ Die Strategien zeigen, dass kleine Änderungen große Wirkung haben können...
                         {"role": "user", "content": prompt}
                     ]
                 )
-                return message.content[0].text
+                return (True, message.content[0].text)
 
             except Exception as e:
                 error_str = str(e)
@@ -439,7 +445,7 @@ Die Strategien zeigen, dass kleine Änderungen große Wirkung haben können...
                         continue
                     else:
                         print(f"❌ Claude API überlastet nach {max_retries} Versuchen")
-                        return f"Zusammenfassung konnte nicht erstellt werden. Claude API ist überlastet. Bitte später erneut versuchen."
+                        return (False, f"Zusammenfassung konnte nicht erstellt werden. Claude API ist überlastet. Bitte später erneut versuchen.")
 
                 # For other errors, try fallback model
                 print(f"❌ Fehler bei Claude Sonnet 4: {e}")
@@ -452,10 +458,10 @@ Die Strategien zeigen, dass kleine Änderungen große Wirkung haben können...
                             {"role": "user", "content": prompt}
                         ]
                     )
-                    return message.content[0].text
+                    return (True, message.content[0].text)
                 except Exception as e2:
                     print(f"❌ Fallback fehlgeschlagen: {e2}")
-                    return f"Zusammenfassung konnte nicht erstellt werden. API Fehler: {e}"
+                    return (False, f"Zusammenfassung konnte nicht erstellt werden. API Fehler: {e}")
     
     def is_recently_added(self, added_at_str, days=7):
         """Check if video was added to playlist within the last N days"""
@@ -609,17 +615,31 @@ Die Strategien zeigen, dass kleine Änderungen große Wirkung haben können...
             transcript = self.get_transcript(video_id)
             if not transcript:
                 print(f"⏭️  Überspringe (kein Transkript)")
+                # Videos ohne Transkript permanent als verarbeitet markieren (nicht wiederholbar)
                 self.processed_videos.add(video_id)
+                self.save_state()
                 continue
 
             # Create summary
             print("🤖 Erstelle Zusammenfassung mit Claude...")
-            summary = self.summarize_with_claude(title, transcript)
+            success, summary = self.summarize_with_claude(title, transcript)
 
-            # Send email
+            if not success:
+                print(f"⚠️  Zusammenfassung fehlgeschlagen. Video wird beim nächsten Durchlauf erneut versucht.")
+                # Video NICHT als verarbeitet markieren, damit es beim nächsten Check erneut versucht wird
+                # Delay between videos to avoid rate limiting
+                print("⏳ Warte 45 Sekunden um Rate Limiting zu vermeiden...")
+                time.sleep(45)
+                continue
+
+            # Send email only if summarization succeeded
             if self.send_email(title, video_id, summary):
+                # Nur bei erfolgreichem Versand als verarbeitet markieren
                 self.processed_videos.add(video_id)
                 self.save_state()
+                print(f"✅ Video erfolgreich verarbeitet und als 'processed' markiert")
+            else:
+                print(f"⚠️  Email-Versand fehlgeschlagen. Video wird beim nächsten Durchlauf erneut versucht.")
 
             # Delay between videos to avoid rate limiting
             print("⏳ Warte 45 Sekunden um Rate Limiting zu vermeiden...")
