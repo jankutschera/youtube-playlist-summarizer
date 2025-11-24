@@ -79,7 +79,10 @@ class YouTubeSummarizer:
                 )
 
                 # Manual OAuth flow (Docker-friendly)
-                auth_url, _ = flow.authorization_url(prompt='consent')
+                auth_url, _ = flow.authorization_url(
+                    prompt='consent',
+                    access_type='offline'
+                )
 
                 print("\n📋 SCHRITT 1: Öffne diese URL in deinem Browser:")
                 print("-" * 60)
@@ -119,17 +122,22 @@ class YouTubeSummarizer:
         return service
     
     def load_state(self):
-        """Load list of already processed video IDs"""
+        """Load already processed videos"""
         if self.state_file.exists():
             with open(self.state_file, 'r') as f:
-                return set(json.load(f))
-        return set()
-    
+                data = json.load(f)
+                # Handle old format (list) vs new format (dict)
+                if isinstance(data, list):
+                    # Convert old format to new format
+                    return {video_id: {} for video_id in data}
+                return data
+        return {}
+
     def save_state(self):
-        """Save list of processed video IDs"""
+        """Save processed videos with all details"""
         self.state_file.parent.mkdir(parents=True, exist_ok=True)
         with open(self.state_file, 'w') as f:
-            json.dump(list(self.processed_videos), f)
+            json.dump(self.processed_videos, f, indent=2)
     
     def get_watch_later_videos(self):
         """Get videos from configured playlist"""
@@ -616,7 +624,15 @@ Die Strategien zeigen, dass kleine Änderungen große Wirkung haben können...
             if not transcript:
                 print(f"⏭️  Überspringe (kein Transkript)")
                 # Videos ohne Transkript permanent als verarbeitet markieren (nicht wiederholbar)
-                self.processed_videos.add(video_id)
+                self.processed_videos[video_id] = {
+                    'title': title,
+                    'channel': video.get('channel', 'Unknown'),
+                    'thumbnail': video.get('thumbnail', f'https://i.ytimg.com/vi/{video_id}/mqdefault.jpg'),
+                    'processed_at': datetime.now().isoformat(),
+                    'added_at': video.get('added_at', ''),
+                    'transcript': '',
+                    'summary': 'Kein Transkript verfügbar'
+                }
                 self.save_state()
                 continue
 
@@ -635,7 +651,15 @@ Die Strategien zeigen, dass kleine Änderungen große Wirkung haben können...
             # Send email only if summarization succeeded
             if self.send_email(title, video_id, summary):
                 # Nur bei erfolgreichem Versand als verarbeitet markieren
-                self.processed_videos.add(video_id)
+                self.processed_videos[video_id] = {
+                    'title': title,
+                    'channel': video.get('channel', 'Unknown'),
+                    'thumbnail': video.get('thumbnail', f'https://i.ytimg.com/vi/{video_id}/mqdefault.jpg'),
+                    'processed_at': datetime.now().isoformat(),
+                    'added_at': video.get('added_at', ''),
+                    'transcript': transcript,
+                    'summary': summary
+                }
                 self.save_state()
                 print(f"✅ Video erfolgreich verarbeitet und als 'processed' markiert")
             else:
@@ -645,6 +669,76 @@ Die Strategien zeigen, dass kleine Änderungen große Wirkung haben können...
             print("⏳ Warte 45 Sekunden um Rate Limiting zu vermeiden...")
             time.sleep(45)  # Erhöht auf 45s um API-Überlastung zu vermeiden
     
+    def backfill_existing_videos(self):
+        """Re-process all existing videos to add summaries and transcripts (without sending emails)"""
+        print("\n🔄 Starte Nachbearbeitung aller bereits verarbeiteten Videos...")
+        print("📧 E-Mails werden NICHT erneut versendet")
+        print("-" * 50)
+
+        # Get all videos from playlist
+        all_videos = self.get_watch_later_videos()
+
+        # Filter to only videos that are already marked as processed
+        videos_to_backfill = [v for v in all_videos if v['id'] in self.processed_videos]
+
+        print(f"📹 {len(videos_to_backfill)} Videos gefunden zum Nachbearbeiten")
+
+        for i, video in enumerate(videos_to_backfill, 1):
+            video_id = video['id']
+            title = video['title']
+
+            # Skip if we already have complete data
+            if self.processed_videos[video_id].get('summary') and self.processed_videos[video_id].get('transcript'):
+                print(f"⏭️  [{i}/{len(videos_to_backfill)}] Überspringe (bereits vollständig): {title[:50]}...")
+                continue
+
+            print(f"\n▶️  [{i}/{len(videos_to_backfill)}] Verarbeite: {title}")
+
+            # Get transcript
+            transcript = self.get_transcript(video_id)
+            if not transcript:
+                print(f"⏭️  Kein Transkript verfügbar")
+                self.processed_videos[video_id] = {
+                    'title': title,
+                    'channel': video.get('channel', 'Unknown'),
+                    'thumbnail': video.get('thumbnail', f'https://i.ytimg.com/vi/{video_id}/mqdefault.jpg'),
+                    'processed_at': self.processed_videos[video_id].get('processed_at', datetime.now().isoformat()),
+                    'added_at': video.get('added_at', ''),
+                    'transcript': '',
+                    'summary': 'Kein Transkript verfügbar'
+                }
+                self.save_state()
+                continue
+
+            # Create summary
+            print("🤖 Erstelle Zusammenfassung mit Claude...")
+            success, summary = self.summarize_with_claude(title, transcript)
+
+            if not success:
+                print(f"⚠️  Zusammenfassung fehlgeschlagen, überspringe dieses Video")
+                time.sleep(45)
+                continue
+
+            # Save data (WITHOUT sending email)
+            self.processed_videos[video_id] = {
+                'title': title,
+                'channel': video.get('channel', 'Unknown'),
+                'thumbnail': video.get('thumbnail', f'https://i.ytimg.com/vi/{video_id}/mqdefault.jpg'),
+                'processed_at': self.processed_videos[video_id].get('processed_at', datetime.now().isoformat()),
+                'added_at': video.get('added_at', ''),
+                'transcript': transcript,
+                'summary': summary
+            }
+            self.save_state()
+            print(f"✅ Daten gespeichert (keine E-Mail versendet)")
+
+            # Delay between videos to avoid rate limiting
+            if i < len(videos_to_backfill):
+                print("⏳ Warte 45 Sekunden um Rate Limiting zu vermeiden...")
+                time.sleep(45)
+
+        print("\n✅ Nachbearbeitung abgeschlossen!")
+
     def run(self):
         """Main run loop"""
         print("🚀 YouTube Playlist Summarizer gestartet!")
@@ -652,13 +746,13 @@ Die Strategien zeigen, dass kleine Änderungen große Wirkung haben können...
         print(f"⏰ Prüfintervall: {self.check_interval} Minuten")
         print(f"📧 Emails an: {self.email_to}")
         print("-" * 50)
-        
+
         while True:
             try:
                 self.process_new_videos()
             except Exception as e:
                 print(f"❌ Unerwarteter Fehler: {e}")
-            
+
             print(f"\n💤 Warte {self.check_interval} Minuten bis zum nächsten Check...")
             time.sleep(self.check_interval * 60)
 

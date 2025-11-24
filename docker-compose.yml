@@ -4,11 +4,17 @@ services:
   youtube-summarizer:
     build: .
     container_name: youtube-summarizer
-    restart: always  # Startet automatisch beim System-Start
-    stdin_open: true
-    tty: true
+    restart: always
     volumes:
-      - ./data:/data  # Speichert OAuth Token und verarbeitete Videos
+      - ./data:/data
+      - ./templates:/app/templates
+      - ./static:/app/static
+      - ./web_app.py:/app/web_app.py
+      - ./youtube_summarizer.py:/app/youtube_summarizer.py
+      - ./backfill_videos.py:/app/backfill_videos.py
+      - ./start.sh:/app/start.sh
+    ports:
+      - "8080:5000"
     environment:
       # Claude API
       - CLAUDE_API_KEY=${CLAUDE_API_KEY}
@@ -31,9 +37,15 @@ services:
       # RapidAPI Key für YouTube Transkripte
       - RAPIDAPI_KEY=${RAPIDAPI_KEY}
 
-    # Health check um sicherzustellen dass Container läuft
+      # Flask
+      - FLASK_SECRET_KEY=${FLASK_SECRET_KEY:-change-this-secret-key-in-production}
+      - REDIRECT_URI=http://localhost:8080/oauth2callback
+      - OAUTHLIB_INSECURE_TRANSPORT=1
+
+    command: bash start.sh
+
     healthcheck:
-      test: ["CMD", "python", "-c", "import sys; sys.exit(0)"]
+      test: ["CMD", "curl", "-f", "http://localhost:5000/"]
       interval: 60s
       timeout: 10s
       retries: 3

@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+
+{% block nav %}{% endblock %}
+
+{% block content %}
+<div style="display: flex; align-items: center; justify-content: center; min-height: 60vh;">
+    <div style="text-align: center; max-width: 500px;">
+        <div style="font-size: 72px; margin-bottom: 24px;">🔐</div>
+        <h2 style="font-size: 32px; margin-bottom: 16px;">Willkommen</h2>
+        <p style="color: #aaa; margin-bottom: 32px; font-size: 18px;">
+            Melde dich mit deinem Google-Konto an, um deine YouTube Watch Later Videos zu verwalten und Zusammenfassungen zu erhalten.
+        </p>
+        <a href="/login" class="btn btn-primary" style="font-size: 18px; padding: 14px 32px;">
+            Mit Google anmelden
+        </a>
+    </div>
+</div>
+{% endblock %}
