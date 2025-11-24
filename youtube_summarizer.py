@@ -192,119 +192,47 @@ class YouTubeSummarizer:
             return []
     
     def get_transcript(self, video_id):
-        """Get transcript using RapidAPI YT API"""
-        import requests
+        """Get transcript using youtube-transcript-api (free, no API key needed)"""
+        from youtube_transcript_api import YouTubeTranscriptApi
+        from youtube_transcript_api._errors import TranscriptsDisabled, NoTranscriptFound
 
         try:
-            print(f"🔍 Versuche Transkript für Video {video_id} mit RapidAPI abzurufen...")
+            print(f"🔍 Versuche Transkript für Video {video_id} abzurufen...")
 
-            # Delay before API call to avoid rate limiting
-            import time
-            time.sleep(3)
-
-            url = "https://yt-api.p.rapidapi.com/subtitles"
-            querystring = {"id": video_id}
-
-            headers = {
-                "x-rapidapi-key": os.getenv('RAPIDAPI_KEY'),
-                "x-rapidapi-host": "yt-api.p.rapidapi.com"
-            }
-
-            response = requests.get(url, headers=headers, params=querystring, timeout=30)
-
-            if response.status_code != 200:
-                print(f"❌ RapidAPI Fehler: Status {response.status_code}")
-                print(f"Response: {response.text[:200]}")
-                return None
-
-            data = response.json()
-
-            # Check if subtitles exist
-            if not data or 'subtitles' not in data:
-                print(f"❌ Keine Untertitel in der Response gefunden")
-                return None
-
-            subtitles = data['subtitles']
-
-            # RapidAPI returns subtitles as a list of subtitle objects
-            if not isinstance(subtitles, list) or len(subtitles) == 0:
-                print(f"❌ Keine Untertitel verfügbar")
-                return None
-
-            # Try to find German or English subtitle, otherwise take the first one
-            import xml.etree.ElementTree as ET
-            import html
-            import re
-
-            selected_subtitle = None
-
-            for subtitle in subtitles:
-                lang_code = subtitle.get('languageCode', '').lower()
-                if 'de' in lang_code:
-                    selected_subtitle = subtitle
-                    break
-
-            if not selected_subtitle:
-                for subtitle in subtitles:
-                    lang_code = subtitle.get('languageCode', '').lower()
-                    if 'en' in lang_code:
-                        selected_subtitle = subtitle
-                        break
-
-            # If still nothing, take the first available
-            if not selected_subtitle and len(subtitles) > 0:
-                selected_subtitle = subtitles[0]
-
-            if not selected_subtitle or 'url' not in selected_subtitle:
-                print(f"❌ Keine Transkript-URL gefunden")
-                return None
-
-            # Fetch the actual transcript from the URL
-            transcript_url = selected_subtitle['url']
-            lang_name = selected_subtitle.get('languageName', 'unknown')
-
-            print(f"📥 Lade Transkript herunter ({lang_name})...")
-
-            # Add delay to avoid rate limiting
-            import time
-            time.sleep(5)  # Wait 5 seconds before downloading
-
-            transcript_response = requests.get(transcript_url, timeout=30)
-
-            if transcript_response.status_code != 200:
-                print(f"❌ Fehler beim Laden des Transkripts: Status {transcript_response.status_code}")
-                return None
-
-            # Parse the XML transcript
+            # Try to get transcript in German first, then English, then any available language
             try:
-                root = ET.fromstring(transcript_response.text)
-                text_parts = []
+                transcript_list = YouTubeTranscriptApi.get_transcript(video_id, languages=['de'])
+                lang_name = 'Deutsch'
+            except NoTranscriptFound:
+                try:
+                    transcript_list = YouTubeTranscriptApi.get_transcript(video_id, languages=['en'])
+                    lang_name = 'English'
+                except NoTranscriptFound:
+                    # Get any available transcript
+                    transcript_list = YouTubeTranscriptApi.get_transcript(video_id)
+                    lang_name = 'Auto-detected'
 
-                # Extract text from all <text> elements
-                for text_elem in root.findall('.//text'):
-                    if text_elem.text:
-                        # Decode HTML entities
-                        decoded = html.unescape(text_elem.text)
-                        text_parts.append(decoded)
+            print(f"📥 Transkript gefunden ({lang_name})...")
 
-                full_text = ' '.join(text_parts)
+            # Combine all transcript segments
+            full_text = ' '.join([item['text'] for item in transcript_list])
 
-                # Clean up extra whitespace
-                full_text = re.sub(r'\s+', ' ', full_text).strip()
+            # Clean up extra whitespace
+            import re
+            full_text = re.sub(r'\s+', ' ', full_text).strip()
 
-                if not full_text:
-                    print(f"❌ Transkript ist leer")
-                    return None
-
-                print(f"✅ Transkript verarbeitet: {len(full_text)} Zeichen")
-                return full_text
-
-            except ET.ParseError as e:
-                print(f"❌ Fehler beim Parsen des Transkript-XML: {e}")
+            if not full_text:
+                print(f"❌ Transkript ist leer")
                 return None
 
-        except requests.exceptions.Timeout:
-            print(f"❌ Timeout beim Abrufen des Transkripts")
+            print(f"✅ Transkript verarbeitet: {len(full_text)} Zeichen")
+            return full_text
+
+        except TranscriptsDisabled:
+            print(f"❌ Transkripte sind für dieses Video deaktiviert")
+            return None
+        except NoTranscriptFound:
+            print(f"❌ Kein Transkript verfügbar für dieses Video")
             return None
         except Exception as e:
             print(f"❌ Fehler beim Abrufen des Transkripts: {e}")
