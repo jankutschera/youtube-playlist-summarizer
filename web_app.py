@@ -13,7 +13,8 @@ import json
 import pickle
 import re
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timedelta
+from collections import OrderedDict
 from flask import Flask, render_template, redirect, url_for, session, request, jsonify
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import Flow
@@ -83,6 +84,74 @@ def markdown_to_html(text):
 app.jinja_env.filters['markdown_to_html'] = markdown_to_html
 
 
+GERMAN_MONTHS = {
+    1: 'Januar', 2: 'Februar', 3: 'März', 4: 'April',
+    5: 'Mai', 6: 'Juni', 7: 'Juli', 8: 'August',
+    9: 'September', 10: 'Oktober', 11: 'November', 12: 'Dezember'
+}
+
+
+def group_videos_by_date(videos):
+    """Group videos by date categories"""
+    today = datetime.now().date()
+    yesterday = today - timedelta(days=1)
+    week_ago = today - timedelta(days=7)
+
+    groups = OrderedDict()
+    groups['Heute'] = []
+    groups['Gestern'] = []
+    groups['Diese Woche'] = []
+
+    # For older videos, group by month
+    monthly_groups = {}
+
+    for video in videos:
+        date_str = video.get('processed_at', '')
+        if not date_str or date_str == 'N/A':
+            # Put videos without date in "Unbekannt"
+            if 'Unbekannt' not in groups:
+                groups['Unbekannt'] = []
+            groups['Unbekannt'].append(video)
+            continue
+
+        try:
+            # Parse the date (format: 2024-11-26 10:30:00 or similar)
+            video_date = datetime.fromisoformat(date_str.replace(' ', 'T').split('.')[0]).date()
+
+            if video_date == today:
+                groups['Heute'].append(video)
+            elif video_date == yesterday:
+                groups['Gestern'].append(video)
+            elif video_date > week_ago:
+                groups['Diese Woche'].append(video)
+            else:
+                # Group by month with German month name
+                month_name = GERMAN_MONTHS[video_date.month]
+                month_key = f"{month_name} {video_date.year}"
+                sort_key = f"{video_date.year}-{video_date.month:02d}"
+                if month_key not in monthly_groups:
+                    monthly_groups[month_key] = {'videos': [], 'sort_key': sort_key}
+                monthly_groups[month_key]['videos'].append(video)
+        except (ValueError, AttributeError):
+            if 'Unbekannt' not in groups:
+                groups['Unbekannt'] = []
+            groups['Unbekannt'].append(video)
+
+    # Remove empty default groups
+    for key in ['Heute', 'Gestern', 'Diese Woche']:
+        if not groups[key]:
+            del groups[key]
+
+    # Add monthly groups sorted by date (newest first)
+    sorted_months = sorted(monthly_groups.items(),
+                          key=lambda x: x[1]['sort_key'],
+                          reverse=True)
+    for month_name, data in sorted_months:
+        groups[month_name] = data['videos']
+
+    return groups
+
+
 def load_processed_videos():
     """Load the processed videos state"""
     if STATE_FILE.exists():
@@ -125,9 +194,17 @@ def index():
     # Load processed videos
     processed = load_processed_videos()
 
-    # Get video details
+    # Get video details (exclude removed videos)
     videos = []
     for video_id, data in processed.items():
+        # Skip removed videos
+        if data.get('status') == 'removed':
+            continue
+
+        # Skip archived videos (they go to /archive)
+        if data.get('status') == 'archived':
+            continue
+
         # If we don't have title, fetch from YouTube
         if not data.get('title'):
             try:
@@ -159,12 +236,15 @@ def index():
     # Sort by added_at date (newest first), fallback to processed_at
     # Videos without dates go to the end
     def sort_key(video):
-        date = video.get('added_at') or video.get('processed_at', '')
+        date = video.get('processed_at', '')
         return date if date else '1970-01-01'  # Very old date for videos without timestamp
 
     videos.sort(key=sort_key, reverse=True)
 
-    return render_template('dashboard.html', videos=videos, total=len(videos))
+    # Group videos by date
+    grouped_videos = group_videos_by_date(videos)
+
+    return render_template('dashboard.html', grouped_videos=grouped_videos, total=len(videos))
 
 
 @app.route('/login')
@@ -177,8 +257,8 @@ def login():
         <p>See README for instructions.</p>
         """
 
-    # Use dynamic redirect URI based on request
-    redirect_uri = url_for('oauth2callback', _external=True)
+    # Use configured redirect URI from environment
+    redirect_uri = REDIRECT_URI
 
     flow = Flow.from_client_secrets_file(
         str(CREDENTIALS_FILE),
@@ -201,7 +281,7 @@ def login():
 def oauth2callback():
     """Handle OAuth callback"""
     state = session.get('state')
-    redirect_uri = session.get('redirect_uri', url_for('oauth2callback', _external=True))
+    redirect_uri = session.get('redirect_uri', REDIRECT_URI)
 
     flow = Flow.from_client_secrets_file(
         str(CREDENTIALS_FILE),
@@ -296,6 +376,113 @@ def api_search():
             })
 
     return jsonify(results)
+
+
+def save_processed_videos(data):
+    """Save processed videos to file"""
+    with open(STATE_FILE, 'w') as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+
+
+@app.route('/api/video/<video_id>/archive', methods=['POST'])
+def archive_video(video_id):
+    """Archive a video"""
+    processed = load_processed_videos()
+
+    if video_id not in processed:
+        return jsonify({'error': 'Video not found'}), 404
+
+    processed[video_id]['status'] = 'archived'
+    save_processed_videos(processed)
+
+    return jsonify({'success': True, 'status': 'archived'})
+
+
+@app.route('/api/video/<video_id>/remove', methods=['POST'])
+def remove_video(video_id):
+    """Mark a video as removed"""
+    processed = load_processed_videos()
+
+    if video_id not in processed:
+        return jsonify({'error': 'Video not found'}), 404
+
+    processed[video_id]['status'] = 'removed'
+    save_processed_videos(processed)
+
+    return jsonify({'success': True, 'status': 'removed'})
+
+
+@app.route('/api/video/<video_id>/restore', methods=['POST'])
+def restore_video(video_id):
+    """Restore a video to active status"""
+    processed = load_processed_videos()
+
+    if video_id not in processed:
+        return jsonify({'error': 'Video not found'}), 404
+
+    processed[video_id]['status'] = 'active'
+    save_processed_videos(processed)
+
+    return jsonify({'success': True, 'status': 'active'})
+
+
+@app.route('/archive')
+def archive():
+    """Show archived videos"""
+    youtube = get_youtube_service()
+
+    if not youtube:
+        return render_template('login.html')
+
+    # Load processed videos
+    processed = load_processed_videos()
+
+    # Get archived videos only
+    videos = []
+    for video_id, data in processed.items():
+        # Filter for archived videos
+        if data.get('status') != 'archived':
+            continue
+
+        # If we don't have title, fetch from YouTube
+        if not data.get('title'):
+            try:
+                response = youtube.videos().list(
+                    part='snippet',
+                    id=video_id
+                ).execute()
+
+                if response.get('items'):
+                    snippet = response['items'][0]['snippet']
+                    data['title'] = snippet.get('title', 'Unknown Title')
+                    data['channel'] = snippet.get('channelTitle', 'Unknown Channel')
+                    data['thumbnail'] = snippet.get('thumbnails', {}).get('medium', {}).get('url', f'https://i.ytimg.com/vi/{video_id}/mqdefault.jpg')
+            except Exception as e:
+                print(f"Error fetching video {video_id}: {e}")
+                data['title'] = 'Unknown Title'
+                data['channel'] = 'Unknown Channel'
+
+        videos.append({
+            'id': video_id,
+            'title': data.get('title', 'Unknown Title'),
+            'channel': data.get('channel', 'Unknown Channel'),
+            'processed_at': data.get('added_at') or data.get('processed_at', 'N/A'),
+            'transcript': data.get('transcript', ''),
+            'summary': data.get('summary', ''),
+            'thumbnail': data.get('thumbnail', f'https://i.ytimg.com/vi/{video_id}/mqdefault.jpg')
+        })
+
+    # Sort by added_at date (newest first)
+    def sort_key(video):
+        date = video.get('processed_at', '')
+        return date if date else '1970-01-01'
+
+    videos.sort(key=sort_key, reverse=True)
+
+    # Group videos by date
+    grouped_videos = group_videos_by_date(videos)
+
+    return render_template('archive.html', grouped_videos=grouped_videos, total=len(videos))
 
 
 if __name__ == '__main__':

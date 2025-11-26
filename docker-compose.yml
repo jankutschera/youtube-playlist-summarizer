@@ -34,8 +34,8 @@ services:
       # YouTube Playlist ID
       - PLAYLIST_ID=${PLAYLIST_ID}
 
-      # RapidAPI Key für YouTube Transkripte
-      - RAPIDAPI_KEY=${RAPIDAPI_KEY}
+      # RapidAPI Keys für YouTube Transkripte (mehrere Keys mit Komma getrennt)
+      - RAPIDAPI_KEYS=${RAPIDAPI_KEYS}
 
       # Flask
       - FLASK_SECRET_KEY=${FLASK_SECRET_KEY:-change-this-secret-key-in-production}

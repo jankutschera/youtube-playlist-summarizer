@@ -133,6 +133,28 @@
             color: #ff0000;
         }
 
+        .date-group {
+            margin-bottom: 40px;
+        }
+
+        .date-header {
+            font-size: 22px;
+            font-weight: 600;
+            color: #f1f1f1;
+            margin-bottom: 20px;
+            padding-bottom: 10px;
+            border-bottom: 2px solid #ff0000;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .date-header .video-count {
+            font-size: 14px;
+            font-weight: 400;
+            color: #aaa;
+        }
+
         .video-grid {
             display: grid;
             grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
@@ -143,12 +165,66 @@
             background: #212121;
             border-radius: 12px;
             overflow: hidden;
-            transition: transform 0.2s;
-            cursor: pointer;
+            transition: transform 0.3s, opacity 0.3s;
+            display: flex;
+            flex-direction: column;
         }
 
         .video-card:hover {
             transform: translateY(-4px);
+        }
+
+        .video-clickable {
+            cursor: pointer;
+            flex: 1;
+        }
+
+        .video-actions {
+            display: flex;
+            gap: 8px;
+            padding: 12px 16px;
+            border-top: 1px solid #3f3f3f;
+            background: #1a1a1a;
+        }
+
+        .action-btn {
+            flex: 1;
+            padding: 8px 12px;
+            border: none;
+            border-radius: 6px;
+            font-size: 13px;
+            cursor: pointer;
+            transition: all 0.2s;
+            font-weight: 500;
+        }
+
+        .archive-btn {
+            background: #3f3f3f;
+            color: #f1f1f1;
+        }
+
+        .archive-btn:hover {
+            background: #4f4f4f;
+        }
+
+        .remove-btn {
+            background: #3f1f1f;
+            color: #ff6b6b;
+        }
+
+        .remove-btn:hover {
+            background: #5f2f2f;
+            color: #ff8888;
+        }
+
+        .restore-btn {
+            background: #1f3f1f;
+            color: #6bff6b;
+        }
+
+        .restore-btn:hover {
+            background: #2f5f2f;
+            color: #88ff88;
         }
 
         .video-card img {
@@ -209,6 +285,7 @@
             <div class="nav-links">
                 {% block nav %}
                 <a href="/">Dashboard</a>
+                <a href="/archive">📁 Archiv</a>
                 <a href="/logout" class="btn btn-secondary">Abmelden</a>
                 {% endblock %}
             </div>

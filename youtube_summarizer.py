@@ -191,28 +191,151 @@ class YouTubeSummarizer:
             traceback.print_exc()
             return []
     
+    def get_transcript_rapidapi(self, video_id):
+        """Fallback: Get transcript using RapidAPI YT API (requires API keys)"""
+        import requests
+
+        # Support multiple RapidAPI keys (comma-separated in .env)
+        rapidapi_keys = os.getenv('RAPIDAPI_KEYS', '').split(',')
+        rapidapi_keys = [key.strip() for key in rapidapi_keys if key.strip()]
+
+        if not rapidapi_keys:
+            print(f"❌ Keine RapidAPI Keys konfiguriert")
+            return None
+
+        # Try each API key in rotation
+        for i, api_key in enumerate(rapidapi_keys):
+            try:
+                print(f"🔄 Versuche RapidAPI (Key {i+1}/{len(rapidapi_keys)})...")
+
+                # Use YT API endpoint for subtitles/captions
+                url = "https://yt-api.p.rapidapi.com/subtitles"
+
+                querystring = {"id": video_id}
+
+                headers = {
+                    "x-rapidapi-key": api_key,
+                    "x-rapidapi-host": "yt-api.p.rapidapi.com"
+                }
+
+                response = requests.get(url, headers=headers, params=querystring, timeout=30)
+
+                if response.status_code == 200:
+                    data = response.json()
+
+                    # YT API returns subtitles in different formats
+                    # Try to extract text from the response
+                    if isinstance(data, dict):
+                        # If it has subtitles array
+                        if 'subtitles' in data and data['subtitles']:
+                            # Get first available subtitle track
+                            subtitle_track = data['subtitles'][0]
+
+                            # Check if we have a URL to fetch transcript from
+                            if 'url' in subtitle_track:
+                                print(f"🔄 Lade Transkript von URL...")
+                                try:
+                                    transcript_response = requests.get(subtitle_track['url'], timeout=30)
+                                    if transcript_response.status_code == 200:
+                                        # Parse XML format (srv1, srv2, srv3)
+                                        import xml.etree.ElementTree as ET
+                                        root = ET.fromstring(transcript_response.text)
+
+                                        # Extract text from all <text> elements
+                                        texts = []
+                                        for text_elem in root.findall('.//text'):
+                                            text_content = text_elem.text
+                                            if text_content:
+                                                texts.append(text_content)
+
+                                        if texts:
+                                            full_text = ' '.join(texts)
+                                        else:
+                                            print(f"❌ RapidAPI: Keine Texte in XML gefunden")
+                                            continue
+                                    else:
+                                        print(f"❌ RapidAPI: URL request failed: {transcript_response.status_code}")
+                                        continue
+                                except Exception as url_error:
+                                    print(f"❌ RapidAPI: Fehler beim Laden von URL: {url_error}")
+                                    continue
+
+                            # Fallback: Check for direct text/segments (old format)
+                            elif 'text' in subtitle_track:
+                                full_text = subtitle_track['text']
+                            elif 'segments' in subtitle_track:
+                                full_text = ' '.join([seg.get('text', '') for seg in subtitle_track['segments']])
+                            else:
+                                print(f"❌ RapidAPI: Unbekanntes Subtitles Format")
+                                print(f"Subtitle keys: {list(subtitle_track.keys())}")
+                                continue
+                        elif 'text' in data:
+                            full_text = data['text']
+                        else:
+                            print(f"❌ RapidAPI: Kein Transkript in Response gefunden")
+                            print(f"Response keys: {list(data.keys())}")
+                            continue
+                    elif isinstance(data, list) and len(data) > 0:
+                        # If it's an array of text segments
+                        full_text = ' '.join([item.get('text', str(item)) for item in data])
+                    else:
+                        print(f"❌ RapidAPI: Unexpected response format: {type(data)}")
+                        continue
+
+                    # Clean up extra whitespace
+                    import re
+                    full_text = re.sub(r'\s+', ' ', full_text).strip()
+
+                    if full_text:
+                        print(f"✅ Transkript via RapidAPI erhalten: {len(full_text)} Zeichen")
+                        return full_text
+                    else:
+                        print(f"❌ RapidAPI: Transkript ist leer")
+                        continue
+
+                elif response.status_code == 429:
+                    print(f"⚠️  RapidAPI Key {i+1} hat Rate Limit erreicht, versuche nächsten...")
+                    continue
+                elif response.status_code == 403:
+                    print(f"⚠️  RapidAPI Key {i+1}: Nicht für diese API subscribed")
+                    continue
+                else:
+                    print(f"❌ RapidAPI Error {response.status_code}: {response.text[:100]}")
+                    continue
+
+            except Exception as e:
+                print(f"❌ RapidAPI Fehler mit Key {i+1}: {e}")
+                import traceback
+                traceback.print_exc()
+                continue
+
+        print(f"❌ Alle RapidAPI Keys erschöpft")
+        return None
+
     def get_transcript(self, video_id):
-        """Get transcript using youtube-transcript-api (free, no API key needed)"""
+        """Get transcript with fallback: youtube-transcript-api -> RapidAPI"""
         from youtube_transcript_api import YouTubeTranscriptApi
         from youtube_transcript_api._errors import TranscriptsDisabled, NoTranscriptFound
 
+        # PRIMARY: Try youtube-transcript-api (free, no rate limits)
         try:
             print(f"🔍 Versuche Transkript für Video {video_id} abzurufen...")
 
-            # Try to get transcript in German first, then English, then any available language
-            try:
-                transcript_list = YouTubeTranscriptApi.get_transcript(video_id, languages=['de'])
-                lang_name = 'Deutsch'
-            except NoTranscriptFound:
-                try:
-                    transcript_list = YouTubeTranscriptApi.get_transcript(video_id, languages=['en'])
-                    lang_name = 'English'
-                except NoTranscriptFound:
-                    # Get any available transcript
-                    transcript_list = YouTubeTranscriptApi.get_transcript(video_id)
-                    lang_name = 'Auto-detected'
+            # Use the NEW API (v1.2+) with proper instantiation
+            ytt_api = YouTubeTranscriptApi()
 
-            print(f"📥 Transkript gefunden ({lang_name})...")
+            # Try to fetch transcript in German first, then English
+            try:
+                fetched_transcript = ytt_api.fetch(video_id, languages=['de', 'en'])
+                lang_name = fetched_transcript.language
+                print(f"📥 Transkript gefunden ({lang_name})...")
+
+                # Convert FetchedTranscript to raw data (list of dicts)
+                transcript_list = fetched_transcript.to_raw_data()
+
+            except NoTranscriptFound:
+                print(f"⚠️  youtube-transcript-api: Kein Transkript in DE/EN gefunden, versuche RapidAPI...")
+                return self.get_transcript_rapidapi(video_id)
 
             # Combine all transcript segments
             full_text = ' '.join([item['text'] for item in transcript_list])
@@ -222,23 +345,31 @@ class YouTubeSummarizer:
             full_text = re.sub(r'\s+', ' ', full_text).strip()
 
             if not full_text:
-                print(f"❌ Transkript ist leer")
-                return None
+                print(f"⚠️  Transkript ist leer, versuche RapidAPI...")
+                return self.get_transcript_rapidapi(video_id)
 
             print(f"✅ Transkript verarbeitet: {len(full_text)} Zeichen")
             return full_text
 
         except TranscriptsDisabled:
-            print(f"❌ Transkripte sind für dieses Video deaktiviert")
-            return None
+            print(f"⚠️  Transkripte deaktiviert via youtube-transcript-api, versuche RapidAPI...")
+            return self.get_transcript_rapidapi(video_id)
+
         except NoTranscriptFound:
-            print(f"❌ Kein Transkript verfügbar für dieses Video")
-            return None
+            print(f"⚠️  Kein Transkript via youtube-transcript-api, versuche RapidAPI...")
+            return self.get_transcript_rapidapi(video_id)
+
         except Exception as e:
-            print(f"❌ Fehler beim Abrufen des Transkripts: {e}")
-            import traceback
-            traceback.print_exc()
-            return None
+            error_msg = str(e)
+            if "no longer available" in error_msg or "VideoUnavailable" in str(type(e)):
+                print(f"⚠️  Video nicht verfügbar via youtube-transcript-api, versuche RapidAPI...")
+                return self.get_transcript_rapidapi(video_id)
+            else:
+                print(f"❌ Unerwarteter Fehler: {e}")
+                import traceback
+                traceback.print_exc()
+                print(f"⚠️  Versuche RapidAPI als Fallback...")
+                return self.get_transcript_rapidapi(video_id)
     
     def calculate_max_tokens(self, title):
         """Berechne max_tokens dynamisch basierend auf Titel"""
@@ -559,7 +690,8 @@ Die Strategien zeigen, dass kleine Änderungen große Wirkung haben können...
                     'processed_at': datetime.now().isoformat(),
                     'added_at': video.get('added_at', ''),
                     'transcript': '',
-                    'summary': 'Kein Transkript verfügbar'
+                    'summary': 'Kein Transkript verfügbar',
+                    'status': 'active'
                 }
                 self.save_state()
                 continue
@@ -586,7 +718,8 @@ Die Strategien zeigen, dass kleine Änderungen große Wirkung haben können...
                     'processed_at': datetime.now().isoformat(),
                     'added_at': video.get('added_at', ''),
                     'transcript': transcript,
-                    'summary': summary
+                    'summary': summary,
+                    'status': 'active'
                 }
                 self.save_state()
                 print(f"✅ Video erfolgreich verarbeitet und als 'processed' markiert")
@@ -633,7 +766,8 @@ Die Strategien zeigen, dass kleine Änderungen große Wirkung haben können...
                     'processed_at': self.processed_videos[video_id].get('processed_at', datetime.now().isoformat()),
                     'added_at': video.get('added_at', ''),
                     'transcript': '',
-                    'summary': 'Kein Transkript verfügbar'
+                    'summary': 'Kein Transkript verfügbar',
+                    'status': self.processed_videos[video_id].get('status', 'active')
                 }
                 self.save_state()
                 continue
@@ -655,7 +789,8 @@ Die Strategien zeigen, dass kleine Änderungen große Wirkung haben können...
                 'processed_at': self.processed_videos[video_id].get('processed_at', datetime.now().isoformat()),
                 'added_at': video.get('added_at', ''),
                 'transcript': transcript,
-                'summary': summary
+                'summary': summary,
+                'status': self.processed_videos[video_id].get('status', 'active')
             }
             self.save_state()
             print(f"✅ Daten gespeichert (keine E-Mail versendet)")

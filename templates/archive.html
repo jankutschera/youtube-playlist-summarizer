@@ -2,17 +2,17 @@
 
 {% block content %}
 <div class="search-bar">
-    <input type="text" id="searchInput" placeholder="🔍 Videos durchsuchen..." onkeyup="searchVideos()">
+    <input type="text" id="searchInput" placeholder="🔍 Archiv durchsuchen..." onkeyup="searchVideos()">
 </div>
 
 <div class="stats">
     <div class="stat-card">
-        <h3>Verarbeitete Videos</h3>
+        <h3>Archivierte Videos</h3>
         <div class="number">{{ total }}</div>
     </div>
     <div class="stat-card">
-        <h3>Status</h3>
-        <div class="number" style="font-size: 20px; color: #0f0;">✓ Aktiv</div>
+        <h3>Info</h3>
+        <div class="number" style="font-size: 16px; color: #aaa;">📁 Gespeichert</div>
     </div>
 </div>
 
@@ -40,8 +40,8 @@
                     </div>
                 </div>
                 <div class="video-actions">
-                    <button class="action-btn archive-btn" onclick="archiveVideo('{{ video.id }}', event)" title="Ins Archiv verschieben">
-                        📁 Archivieren
+                    <button class="action-btn restore-btn" onclick="restoreVideo('{{ video.id }}', event)" title="Zurück zur Hauptseite">
+                        ↩️ Wiederherstellen
                     </button>
                     <button class="action-btn remove-btn" onclick="removeVideo('{{ video.id }}', event)" title="Video entfernen">
                         🗑️ Entfernen
@@ -55,8 +55,8 @@
 </div>
 {% else %}
 <div class="empty-state">
-    <h2>Noch keine Videos verarbeitet</h2>
-    <p>Füge Videos zu deiner Watch Later Liste hinzu, und sie werden automatisch hier erscheinen.</p>
+    <h2>Noch keine Videos archiviert</h2>
+    <p>Videos die du archivierst werden hier gespeichert.</p>
 </div>
 {% endif %}
 
@@ -92,15 +92,15 @@ function searchVideos() {
     }
 }
 
-async function archiveVideo(videoId, event) {
+async function restoreVideo(videoId, event) {
     event.stopPropagation(); // Prevent navigation to video detail
 
-    if (!confirm('Möchtest du dieses Video ins Archiv verschieben?')) {
+    if (!confirm('Möchtest du dieses Video wiederherstellen?')) {
         return;
     }
 
     try {
-        const response = await fetch(`/api/video/${videoId}/archive`, {
+        const response = await fetch(`/api/video/${videoId}/restore`, {
             method: 'POST'
         });
 
@@ -111,11 +111,11 @@ async function archiveVideo(videoId, event) {
             card.style.transform = 'scale(0.8)';
             setTimeout(() => card.remove(), 300);
         } else {
-            alert('Fehler beim Archivieren des Videos');
+            alert('Fehler beim Wiederherstellen des Videos');
         }
     } catch (error) {
         console.error('Error:', error);
-        alert('Fehler beim Archivieren des Videos');
+        alert('Fehler beim Wiederherstellen des Videos');
     }
 }
 
