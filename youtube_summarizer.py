@@ -20,8 +20,8 @@ from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 
-# YouTube OAuth2 Scopes - wir brauchen readonly für Watch Later
-SCOPES = ['https://www.googleapis.com/auth/youtube.readonly']
+# YouTube OAuth2 Scopes - wir brauchen Schreibzugriff um Videos aus Playlist zu entfernen
+SCOPES = ['https://www.googleapis.com/auth/youtube', 'https://www.googleapis.com/auth/youtube.readonly']
 
 
 class YouTubeSummarizer:
@@ -177,10 +177,13 @@ class YouTubeSummarizer:
                 title = item['snippet']['title']
                 # publishedAt ist das Datum, wann das Video zur Playlist hinzugefügt wurde
                 added_at = item['snippet']['publishedAt']
+                # playlist_item_id wird benötigt um Videos aus der Playlist zu entfernen
+                playlist_item_id = item['id']
                 videos.append({
                     'id': video_id,
                     'title': title,
-                    'added_at': added_at
+                    'added_at': added_at,
+                    'playlist_item_id': playlist_item_id
                 })
 
             print(f"📊 API hat {len(videos)} Videos in Watch Later gefunden")
@@ -190,7 +193,17 @@ class YouTubeSummarizer:
             import traceback
             traceback.print_exc()
             return []
-    
+
+    def remove_from_playlist(self, playlist_item_id, title):
+        """Remove a video from the playlist after successful processing"""
+        try:
+            self.youtube.playlistItems().delete(id=playlist_item_id).execute()
+            print(f"🗑️  Video aus Playlist entfernt: {title[:50]}...")
+            return True
+        except Exception as e:
+            print(f"⚠️  Konnte Video nicht aus Playlist entfernen: {e}")
+            return False
+
     def get_transcript_rapidapi(self, video_id):
         """Fallback: Get transcript using RapidAPI YT API (requires API keys)"""
         import requests
@@ -394,6 +407,59 @@ class YouTubeSummarizer:
         # Standard für Videos ohne große Listen
         return 4000
 
+    def create_bullet_summary(self, title, transcript):
+        """Create quick bullet-point summary with emojis
+
+        Returns:
+            tuple: (success: bool, summary: str)
+        """
+        import time
+
+        prompt = f"""Fasse das folgende YouTube-Video-Transkript in prägnante Bullet-Points zusammen.
+Wähle für jeden Punkt ein passendes Emoji am Anfang.
+Antworte auf Deutsch.
+
+Video-Titel: {title}
+
+Transkript:
+{transcript[:15000]}
+
+REGELN:
+- Jeder Bullet-Point beginnt mit einem passenden Emoji
+- Maximal 15-25 Bullet-Points
+- Jeder Punkt ist 1 kurzer Satz (max 15 Wörter)
+- Fokussiere auf die wichtigsten Erkenntnisse und Takeaways
+- Keine Überschriften, nur Bullet-Points
+- Format: EMOJI Kurztext
+
+Beispiel-Output:
+⏳ Wir haben nicht alle die gleichen "24 Stunden" - Ressourcen und Teams unterscheiden sich.
+⚡ Der Schlüssel ist Aktivierungsenergie, nicht Motivation oder Disziplin.
+🚀 Der schwierigste Teil ist das Anfangen, nicht das Durchhalten.
+☀️ Morgenlicht-Therapie: 10.000-Lux-Lampe innerhalb 30 Min nach dem Aufwachen."""
+
+        max_retries = 3
+        base_delay = 10
+
+        for attempt in range(max_retries):
+            try:
+                message = self.claude_client.messages.create(
+                    model="claude-sonnet-4-20250514",
+                    max_tokens=2000,
+                    messages=[{"role": "user", "content": prompt}]
+                )
+                return (True, message.content[0].text)
+            except Exception as e:
+                error_str = str(e)
+                if "overloaded" in error_str.lower() or "529" in error_str:
+                    if attempt < max_retries - 1:
+                        wait_time = base_delay * (2 ** attempt)
+                        print(f"⚠️ Claude API überlastet. Warte {wait_time}s...")
+                        time.sleep(wait_time)
+                        continue
+                print(f"❌ Bullet-Summary fehlgeschlagen: {e}")
+                return (False, "")
+
     def summarize_with_claude(self, title, transcript):
         """Create summary using Claude
 
@@ -403,6 +469,13 @@ class YouTubeSummarizer:
                 - summary: The summary text (or error message if failed)
         """
         import re
+
+        # STEP 1: Create quick bullet-point summary with emojis
+        print("📝 Erstelle Quick-Scan (Bullet-Points)...")
+        bullet_success, bullet_summary = self.create_bullet_summary(title, transcript)
+
+        # STEP 2: Create detailed summary
+        print("📄 Erstelle detaillierte Zusammenfassung...")
 
         # Extrahiere Zahlen aus dem Titel um zu prüfen ob es ein Listen-Video ist
         numbers = re.findall(r'\b(\d+)\b', title)
@@ -498,7 +571,23 @@ Die Strategien zeigen, dass kleine Änderungen große Wirkung haben können...
                         {"role": "user", "content": prompt}
                     ]
                 )
-                return (True, message.content[0].text)
+                detailed_summary = message.content[0].text
+
+                # Combine both summaries: Quick Scan first, then detailed
+                if bullet_success and bullet_summary:
+                    combined_summary = f"""QUICK SCAN
+{'=' * 40}
+{bullet_summary}
+
+{'=' * 40}
+AUSFÜHRLICHE ZUSAMMENFASSUNG
+{'=' * 40}
+
+{detailed_summary}"""
+                else:
+                    combined_summary = detailed_summary
+
+                return (True, combined_summary)
 
             except Exception as e:
                 error_str = str(e)
@@ -525,7 +614,23 @@ Die Strategien zeigen, dass kleine Änderungen große Wirkung haben können...
                             {"role": "user", "content": prompt}
                         ]
                     )
-                    return (True, message.content[0].text)
+                    detailed_summary = message.content[0].text
+
+                    # Combine both summaries
+                    if bullet_success and bullet_summary:
+                        combined_summary = f"""QUICK SCAN
+{'=' * 40}
+{bullet_summary}
+
+{'=' * 40}
+AUSFÜHRLICHE ZUSAMMENFASSUNG
+{'=' * 40}
+
+{detailed_summary}"""
+                    else:
+                        combined_summary = detailed_summary
+
+                    return (True, combined_summary)
                 except Exception as e2:
                     print(f"❌ Fallback fehlgeschlagen: {e2}")
                     return (False, f"Zusammenfassung konnte nicht erstellt werden. API Fehler: {e}")
@@ -723,6 +828,10 @@ Die Strategien zeigen, dass kleine Änderungen große Wirkung haben können...
                 }
                 self.save_state()
                 print(f"✅ Video erfolgreich verarbeitet und als 'processed' markiert")
+
+                # Video aus der Playlist entfernen nach erfolgreicher Verarbeitung
+                if video.get('playlist_item_id'):
+                    self.remove_from_playlist(video['playlist_item_id'], title)
             else:
                 print(f"⚠️  Email-Versand fehlgeschlagen. Video wird beim nächsten Durchlauf erneut versucht.")
 

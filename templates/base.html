@@ -275,6 +275,31 @@
             font-size: 24px;
             margin-bottom: 16px;
         }
+
+        /* Unread badge styles */
+        .video-card.unread {
+            border: 2px solid #ff6b6b;
+        }
+
+        .video-clickable {
+            position: relative;
+        }
+
+        .unread-badge {
+            position: absolute;
+            top: 12px;
+            right: 12px;
+            background: #ff0000;
+            color: white;
+            padding: 4px 10px;
+            border-radius: 4px;
+            font-size: 11px;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            z-index: 10;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+        }
     </style>
     {% block extra_css %}{% endblock %}
 </head>

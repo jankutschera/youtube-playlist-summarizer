@@ -97,6 +97,69 @@
     .back-link:hover {
         color: #fff;
     }
+
+    .video-actions-detail {
+        display: flex;
+        gap: 12px;
+        margin-top: 20px;
+    }
+
+    .action-btn {
+        padding: 10px 20px;
+        border: none;
+        border-radius: 8px;
+        cursor: pointer;
+        font-size: 14px;
+        transition: all 0.2s ease;
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+    }
+
+    .archive-btn {
+        background: #3f3f3f;
+        color: #fff;
+    }
+
+    .archive-btn:hover {
+        background: #4a4a4a;
+    }
+
+    .remove-btn {
+        background: #3f3f3f;
+        color: #ff4444;
+    }
+
+    .remove-btn:hover {
+        background: #4a4a4a;
+    }
+
+    .nav-buttons {
+        display: flex;
+        gap: 12px;
+        margin-left: auto;
+    }
+
+    .nav-btn {
+        background: #3f3f3f;
+        color: #fff;
+        padding: 10px 16px;
+        border: none;
+        border-radius: 8px;
+        cursor: pointer;
+        font-size: 14px;
+        text-decoration: none;
+        transition: all 0.2s ease;
+    }
+
+    .nav-btn:hover {
+        background: #4a4a4a;
+    }
+
+    .nav-btn:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+    }
 </style>
 {% endblock %}
 
@@ -111,10 +174,28 @@
             <div><strong>Verarbeitet:</strong> {{ video.processed_at }}</div>
             <div><strong>Video ID:</strong> {{ video.id }}</div>
         </div>
-        <div style="margin-top: 20px;">
+        <div style="margin-top: 20px; display: flex; align-items: center; flex-wrap: wrap; gap: 12px;">
             <a href="https://www.youtube.com/watch?v={{ video.id }}" target="_blank" class="btn btn-primary">
                 ▶ Auf YouTube ansehen
             </a>
+
+            <div class="video-actions-detail">
+                <button class="action-btn archive-btn" onclick="archiveVideo('{{ video.id }}')">
+                    📁 Archivieren
+                </button>
+                <button class="action-btn remove-btn" onclick="removeVideo('{{ video.id }}')">
+                    🗑️ Entfernen
+                </button>
+            </div>
+
+            <div class="nav-buttons">
+                {% if prev_video %}
+                <a href="/video/{{ prev_video }}" class="nav-btn">← Vorheriges</a>
+                {% endif %}
+                {% if next_video %}
+                <a href="/video/{{ next_video }}" class="nav-btn">Nächstes →</a>
+                {% endif %}
+            </div>
         </div>
     </div>
 
@@ -142,4 +223,62 @@
     </div>
     {% endif %}
 </div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+const nextVideoUrl = {% if next_video %}'/video/{{ next_video }}'{% else %}null{% endif %};
+
+async function archiveVideo(videoId) {
+    if (!confirm('Möchtest du dieses Video ins Archiv verschieben?')) {
+        return;
+    }
+
+    try {
+        const response = await fetch(`/api/video/${videoId}/archive`, {
+            method: 'POST'
+        });
+
+        if (response.ok) {
+            // Redirect to next video or dashboard
+            if (nextVideoUrl) {
+                window.location.href = nextVideoUrl;
+            } else {
+                window.location.href = '/';
+            }
+        } else {
+            alert('Fehler beim Archivieren des Videos');
+        }
+    } catch (error) {
+        console.error('Error:', error);
+        alert('Fehler beim Archivieren des Videos');
+    }
+}
+
+async function removeVideo(videoId) {
+    if (!confirm('Möchtest du dieses Video wirklich entfernen?')) {
+        return;
+    }
+
+    try {
+        const response = await fetch(`/api/video/${videoId}/remove`, {
+            method: 'POST'
+        });
+
+        if (response.ok) {
+            // Redirect to next video or dashboard
+            if (nextVideoUrl) {
+                window.location.href = nextVideoUrl;
+            } else {
+                window.location.href = '/';
+            }
+        } else {
+            alert('Fehler beim Entfernen des Videos');
+        }
+    } catch (error) {
+        console.error('Error:', error);
+        alert('Fehler beim Entfernen des Videos');
+    }
+}
+</script>
 {% endblock %}

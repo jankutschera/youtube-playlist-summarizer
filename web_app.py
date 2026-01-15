@@ -25,7 +25,7 @@ app = Flask(__name__)
 app.secret_key = os.getenv('FLASK_SECRET_KEY', 'dev-secret-key-change-in-production')
 
 # Configuration
-SCOPES = ['https://www.googleapis.com/auth/youtube.readonly']
+SCOPES = ['https://www.googleapis.com/auth/youtube', 'https://www.googleapis.com/auth/youtube.readonly']
 CREDENTIALS_FILE = Path('/data/credentials.json')
 TOKEN_FILE = Path('/data/token.pickle')
 STATE_FILE = Path('/data/processed_videos.json')
@@ -230,7 +230,8 @@ def index():
             'processed_at': data.get('added_at') or data.get('processed_at', 'N/A'),
             'transcript': data.get('transcript', ''),
             'summary': data.get('summary', ''),
-            'thumbnail': data.get('thumbnail', f'https://i.ytimg.com/vi/{video_id}/mqdefault.jpg')
+            'thumbnail': data.get('thumbnail', f'https://i.ytimg.com/vi/{video_id}/mqdefault.jpg'),
+            'read': data.get('read', False)
         })
 
     # Sort by added_at date (newest first), fallback to processed_at
@@ -244,7 +245,10 @@ def index():
     # Group videos by date
     grouped_videos = group_videos_by_date(videos)
 
-    return render_template('dashboard.html', grouped_videos=grouped_videos, total=len(videos))
+    # Count unread videos
+    unread_count = sum(1 for v in videos if not v.get('read'))
+
+    return render_template('dashboard.html', grouped_videos=grouped_videos, total=len(videos), unread_count=unread_count)
 
 
 @app.route('/login')
@@ -280,25 +284,48 @@ def login():
 @app.route('/oauth2callback')
 def oauth2callback():
     """Handle OAuth callback"""
-    state = session.get('state')
-    redirect_uri = session.get('redirect_uri', REDIRECT_URI)
+    try:
+        state = session.get('state')
+        redirect_uri = session.get('redirect_uri', REDIRECT_URI)
 
-    flow = Flow.from_client_secrets_file(
-        str(CREDENTIALS_FILE),
-        scopes=SCOPES,
-        state=state,
-        redirect_uri=redirect_uri
-    )
+        print(f"OAuth callback - state: {state}")
+        print(f"OAuth callback - redirect_uri: {redirect_uri}")
+        print(f"OAuth callback - request.url: {request.url}")
 
-    flow.fetch_token(authorization_response=request.url)
+        flow = Flow.from_client_secrets_file(
+            str(CREDENTIALS_FILE),
+            scopes=SCOPES,
+            state=state,
+            redirect_uri=redirect_uri
+        )
 
-    credentials = flow.credentials
+        # Fix HTTPS/HTTP mismatch from reverse proxy
+        authorization_response = request.url
+        if authorization_response.startswith('http://') and 'localhost' not in authorization_response:
+            authorization_response = authorization_response.replace('http://', 'https://', 1)
+            print(f"OAuth callback - fixed URL: {authorization_response}")
 
-    # Save credentials
-    with open(TOKEN_FILE, 'wb') as token:
-        pickle.dump(credentials, token)
+        flow.fetch_token(authorization_response=authorization_response)
 
-    return redirect(url_for('index'))
+        credentials = flow.credentials
+        print(f"OAuth callback - got credentials, scopes: {credentials.scopes}")
+
+        # Save credentials (pickle is used here as it's the existing pattern for OAuth tokens)
+        with open(TOKEN_FILE, 'wb') as token:
+            pickle.dump(credentials, token)
+
+        print("OAuth callback - saved token successfully")
+        return redirect(url_for('index'))
+    except Exception as e:
+        import traceback
+        error_details = traceback.format_exc()
+        print(f"OAuth callback ERROR: {e}")
+        print(f"Traceback: {error_details}")
+        return f"""
+        <h1>OAuth Error</h1>
+        <pre>{error_details}</pre>
+        <p><a href="/login">Try again</a></p>
+        """, 500
 
 
 @app.route('/logout')
@@ -324,6 +351,34 @@ def video_detail(video_id):
 
     video = processed[video_id]
 
+    # Mark video as read
+    if not video.get('read'):
+        video['read'] = True
+        save_processed_videos(processed)
+
+    # Get sorted list of active videos for navigation
+    active_videos = []
+    for vid, data in processed.items():
+        if data.get('status') not in ['archived', 'removed']:
+            date = data.get('added_at') or data.get('processed_at', '')
+            active_videos.append((vid, date))
+
+    # Sort by date (newest first)
+    active_videos.sort(key=lambda x: x[1] if x[1] else '1970-01-01', reverse=True)
+    video_ids = [v[0] for v in active_videos]
+
+    # Find prev/next videos
+    prev_video = None
+    next_video = None
+    try:
+        current_idx = video_ids.index(video_id)
+        if current_idx > 0:
+            prev_video = video_ids[current_idx - 1]
+        if current_idx < len(video_ids) - 1:
+            next_video = video_ids[current_idx + 1]
+    except ValueError:
+        pass
+
     # Fetch video details from YouTube if not cached
     if not video.get('title'):
         try:
@@ -344,7 +399,7 @@ def video_detail(video_id):
 
     video['id'] = video_id
 
-    return render_template('video_detail.html', video=video)
+    return render_template('video_detail.html', video=video, prev_video=prev_video, next_video=next_video)
 
 
 @app.route('/api/videos')

@@ -11,8 +11,8 @@
         <div class="number">{{ total }}</div>
     </div>
     <div class="stat-card">
-        <h3>Status</h3>
-        <div class="number" style="font-size: 20px; color: #0f0;">✓ Aktiv</div>
+        <h3>Ungelesen</h3>
+        <div class="number" style="color: {% if unread_count > 0 %}#ff6b6b{% else %}#0f0{% endif %};">{{ unread_count }}</div>
     </div>
 </div>
 
@@ -23,8 +23,11 @@
         <h2 class="date-header">{{ group_name }} <span class="video-count">({{ videos|length }})</span></h2>
         <div class="video-grid">
             {% for video in videos %}
-            <div class="video-card" data-video-id="{{ video.id }}">
+            <div class="video-card {% if not video.read %}unread{% endif %}" data-video-id="{{ video.id }}">
                 <div class="video-clickable" onclick="window.location.href='/video/{{ video.id }}'">
+                    {% if not video.read %}
+                    <span class="unread-badge">NEU</span>
+                    {% endif %}
                     <img src="{{ video.thumbnail }}" alt="{{ video.title }}">
                     <div class="video-info">
                         <div class="video-title">{{ video.title }}</div>
