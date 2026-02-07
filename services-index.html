@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Services - lucia-allegra.com</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            min-height: 100vh;
+            color: #f1f1f1;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }
+        .container {
+            max-width: 800px;
+            width: 100%;
+        }
+        h1 {
+            font-size: 32px;
+            margin-bottom: 10px;
+            color: #fff;
+        }
+        .subtitle {
+            color: #888;
+            margin-bottom: 40px;
+            font-size: 16px;
+        }
+        .services-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+            gap: 20px;
+        }
+        .service-card {
+            background: rgba(255,255,255,0.05);
+            border: 1px solid rgba(255,255,255,0.1);
+            border-radius: 16px;
+            padding: 24px;
+            transition: all 0.3s;
+            text-decoration: none;
+            color: inherit;
+            display: block;
+        }
+        .service-card:hover {
+            transform: translateY(-4px);
+            background: rgba(255,255,255,0.08);
+            border-color: rgba(255,255,255,0.2);
+        }
+        .service-icon {
+            font-size: 40px;
+            margin-bottom: 16px;
+        }
+        .service-name {
+            font-size: 20px;
+            font-weight: 600;
+            margin-bottom: 8px;
+        }
+        .service-desc {
+            font-size: 14px;
+            color: #888;
+            line-height: 1.5;
+        }
+        .service-status {
+            display: inline-block;
+            margin-top: 12px;
+            padding: 4px 10px;
+            border-radius: 12px;
+            font-size: 12px;
+            font-weight: 500;
+        }
+        .status-online {
+            background: rgba(34, 197, 94, 0.2);
+            color: #22c55e;
+        }
+        .status-offline {
+            background: rgba(239, 68, 68, 0.2);
+            color: #ef4444;
+        }
+        footer {
+            margin-top: 60px;
+            text-align: center;
+            color: #555;
+            font-size: 14px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Services</h1>
+        <p class="subtitle">Interne Dienste und Tools</p>
+
+        <div class="services-grid">
+            <a href="https://yt.lucia-allegra.com" class="service-card">
+                <div class="service-icon">📺</div>
+                <div class="service-name">YouTube Summarizer</div>
+                <div class="service-desc">Automatische Zusammenfassungen von YouTube-Videos mit KI</div>
+                <span class="service-status status-online">Online</span>
+            </a>
+
+            <a href="https://lucia-allegra.de:5001" class="service-card">
+                <div class="service-icon">💾</div>
+                <div class="service-name">Synology DSM</div>
+                <div class="service-desc">NAS-Verwaltung und Dateien</div>
+                <span class="service-status status-online">Online</span>
+            </a>
+
+            <!-- Weitere Dienste hier hinzufuegen -->
+
+        </div>
+
+        <footer>
+            lucia-allegra.com - Private Services
+        </footer>
+    </div>
+</body>
+</html>

@@ -1,0 +1,16 @@
+{
+  "5a3c8b2d-1e4f-4a5b-9c6d-7e8f9a0b1c2d": {
+    "description": "YouTube Summarizer",
+    "target": "http://localhost:8080",
+    "source": {
+      "host": "lucia-allegra.de",
+      "port": 443,
+      "https": true
+    },
+    "backend": {
+      "host": "localhost",
+      "port": 8080,
+      "https": false
+    }
+  }
+}
