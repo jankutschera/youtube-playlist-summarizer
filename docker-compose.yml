@@ -11,13 +11,17 @@ services:
       - ./static:/app/static
       - ./web_app.py:/app/web_app.py
       - ./youtube_summarizer.py:/app/youtube_summarizer.py
+      - ./database.py:/app/database.py
+      - ./migrate_to_sqlite.py:/app/migrate_to_sqlite.py
       - ./backfill_videos.py:/app/backfill_videos.py
+      - ./supervisord.conf:/app/supervisord.conf
       - ./start.sh:/app/start.sh
     ports:
       - "8080:5000"
     environment:
       # Claude API
       - CLAUDE_API_KEY=${CLAUDE_API_KEY}
+      - CLAUDE_MODEL=${CLAUDE_MODEL:-claude-sonnet-4-5-20250929}
 
       # Email Einstellungen
       - EMAIL_FROM=${EMAIL_FROM}
@@ -39,13 +43,13 @@ services:
 
       # Flask
       - FLASK_SECRET_KEY=${FLASK_SECRET_KEY:-change-this-secret-key-in-production}
-      - REDIRECT_URI=http://localhost:8080/oauth2callback
+      - REDIRECT_URI=https://yt.lucia-allegra.com/oauth2callback
       - OAUTHLIB_INSECURE_TRANSPORT=1
 
     command: bash start.sh
 
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:5000/"]
+      test: ["CMD", "curl", "-f", "http://localhost:5000/api/status"]
       interval: 60s
       timeout: 10s
       retries: 3

@@ -7,6 +7,7 @@ Checks your Watch Later playlist and sends email summaries of new videos
 import os
 import time
 import json
+import logging
 import smtplib
 import pickle
 from email.mime.text import MIMEText
@@ -15,13 +16,22 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 import anthropic
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+log = logging.getLogger(__name__)
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 
+import database
+
 # YouTube OAuth2 Scopes - wir brauchen Schreibzugriff um Videos aus Playlist zu entfernen
-SCOPES = ['https://www.googleapis.com/auth/youtube', 'https://www.googleapis.com/auth/youtube.readonly']
+SCOPES = ['https://www.googleapis.com/auth/youtube']
 
 
 class YouTubeSummarizer:
@@ -35,6 +45,7 @@ class YouTubeSummarizer:
         self.smtp_port = int(os.getenv('SMTP_PORT', '587'))
         self.check_interval = int(os.getenv('CHECK_INTERVAL_MINUTES', '30'))
         self.playlist_id = os.getenv('PLAYLIST_ID', 'WL')  # Default: Watch Later
+        self.claude_model = os.getenv('CLAUDE_MODEL', 'claude-sonnet-4-5-20250929')
         
         # OAuth2 credentials files
         self.credentials_file = Path('/data/credentials.json')
@@ -43,11 +54,43 @@ class YouTubeSummarizer:
         # Initialize APIs
         self.youtube = self.get_authenticated_service()
         self.claude_client = anthropic.Anthropic(api_key=self.claude_api_key)
-        
-        # Track processed videos
-        self.state_file = Path('/data/processed_videos.json')
-        self.processed_videos = self.load_state()
-    
+
+        # Initialize SQLite database
+        database.init_db()
+
+        # Quota tracking
+        self.daily_quota_limit = 10000
+        self._init_quota()
+
+    def _init_quota(self):
+        """Initialize or reset daily quota counter."""
+        today = datetime.now().strftime('%Y-%m-%d')
+        stored_date = database.get_setting('quota_date')
+        if stored_date != today:
+            database.set_setting('quota_date', today)
+            database.set_setting('quota_used', '0')
+
+    def _add_quota(self, units):
+        """Add quota units and check thresholds."""
+        self._init_quota()  # Reset if new day
+        current = int(database.get_setting('quota_used', '0'))
+        new_total = current + units
+        database.set_setting('quota_used', str(new_total))
+
+        pct = new_total / self.daily_quota_limit * 100
+        if pct >= 95:
+            log.error(f"🚨 YouTube API quota at {pct:.0f}% ({new_total}/{self.daily_quota_limit}) - PAUSING")
+            return False  # Signal to stop processing
+        elif pct >= 80:
+            log.warning(f"⚠️  YouTube API quota at {pct:.0f}% ({new_total}/{self.daily_quota_limit})")
+        return True
+
+    def _quota_available(self):
+        """Check if we have quota remaining."""
+        self._init_quota()
+        current = int(database.get_setting('quota_used', '0'))
+        return current < (self.daily_quota_limit * 0.95)
+
     def get_authenticated_service(self):
         """Authenticate with YouTube using OAuth2"""
         creds = None
@@ -60,17 +103,17 @@ class YouTubeSummarizer:
         # If no valid credentials, authenticate
         if not creds or not creds.valid:
             if creds and creds.expired and creds.refresh_token:
-                print("🔄 Token abgelaufen, erneuere...")
+                log.info("🔄 Token abgelaufen, erneuere...")
                 creds.refresh(Request())
             else:
                 if not self.credentials_file.exists():
-                    print("❌ FEHLER: credentials.json nicht gefunden!")
-                    print("📝 Bitte lade deine OAuth2 credentials.json herunter und lege sie nach /data/credentials.json")
-                    print("📖 Siehe README für Anleitung!")
+                    log.error("❌ FEHLER: credentials.json nicht gefunden!")
+                    log.info("📝 Bitte lade deine OAuth2 credentials.json herunter und lege sie nach /data/credentials.json")
+                    log.info("📖 Siehe README für Anleitung!")
                     raise FileNotFoundError("credentials.json fehlt in /data/")
                 
-                print("🔐 Erste Authentifizierung erforderlich!")
-                print("=" * 60)
+                log.info("🔐 Erste Authentifizierung erforderlich!")
+                log.info("=" * 60)
 
                 flow = InstalledAppFlow.from_client_secrets_file(
                     str(self.credentials_file),
@@ -84,13 +127,13 @@ class YouTubeSummarizer:
                     access_type='offline'
                 )
 
-                print("\n📋 SCHRITT 1: Öffne diese URL in deinem Browser:")
-                print("-" * 60)
-                print(auth_url)
-                print("-" * 60)
+                log.info("\n📋 SCHRITT 1: Öffne diese URL in deinem Browser:")
+                log.info("-" * 60)
+                log.info(auth_url)
+                log.info("-" * 60)
 
-                print("\n📋 SCHRITT 2: Nach der Anmeldung bekommst du einen CODE angezeigt.")
-                print("Kopiere diesen CODE (eine lange Zeichenkette).\n")
+                log.info("\n📋 SCHRITT 2: Nach der Anmeldung bekommst du einen CODE angezeigt.")
+                log.info("Kopiere diesen CODE (eine lange Zeichenkette).\n")
 
                 auth_code = input("🔑 Füge den CODE hier ein und drücke Enter: ").strip()
 
@@ -102,7 +145,7 @@ class YouTubeSummarizer:
             with open(self.token_file, 'wb') as token:
                 pickle.dump(creds, token)
             
-            print("✅ Authentifizierung erfolgreich!")
+            log.info("✅ Authentifizierung erfolgreich!")
         
         service = build('youtube', 'v3', credentials=creds)
 
@@ -115,35 +158,17 @@ class YouTubeSummarizer:
             channel_response = channel_request.execute()
             if channel_response.get('items'):
                 channel_title = channel_response['items'][0]['snippet']['title']
-                print(f"✅ Verbunden mit YouTube Account: {channel_title}")
+                log.info(f"✅ Verbunden mit YouTube Account: {channel_title}")
         except Exception as e:
-            print(f"⚠️  Konnte Account-Info nicht abrufen: {e}")
+            log.warning(f"⚠️  Konnte Account-Info nicht abrufen: {e}")
 
         return service
-    
-    def load_state(self):
-        """Load already processed videos"""
-        if self.state_file.exists():
-            with open(self.state_file, 'r') as f:
-                data = json.load(f)
-                # Handle old format (list) vs new format (dict)
-                if isinstance(data, list):
-                    # Convert old format to new format
-                    return {video_id: {} for video_id in data}
-                return data
-        return {}
-
-    def save_state(self):
-        """Save processed videos with all details"""
-        self.state_file.parent.mkdir(parents=True, exist_ok=True)
-        with open(self.state_file, 'w') as f:
-            json.dump(self.processed_videos, f, indent=2)
     
     def get_watch_later_videos(self):
         """Get videos from configured playlist"""
         try:
-            print(f"🔍 Versuche Playlist abzurufen...")
-            print(f"🔍 Verwende Playlist ID: {self.playlist_id}")
+            log.info(f"🔍 Versuche Playlist abzurufen...")
+            log.info(f"🔍 Verwende Playlist ID: {self.playlist_id}")
 
             # Get ALL playlist items with pagination
             all_items = []
@@ -157,6 +182,7 @@ class YouTubeSummarizer:
                     pageToken=next_page_token
                 )
                 response = request.execute()
+                self._add_quota(1)  # playlistItems.list = 1 unit
 
                 all_items.extend(response.get('items', []))
                 next_page_token = response.get('nextPageToken')
@@ -164,13 +190,13 @@ class YouTubeSummarizer:
                 if not next_page_token:
                     break
 
-            print(f"🔍 API Response erhalten. Keys: {list(response.keys())}")
-            print(f"🔍 Total Results: {response.get('pageInfo', {}).get('totalResults', 'unknown')}")
-            print(f"🔍 Total Videos geholt mit Pagination: {len(all_items)}")
+            log.info(f"🔍 API Response erhalten. Keys: {list(response.keys())}")
+            log.info(f"🔍 Total Results: {response.get('pageInfo', {}).get('totalResults', 'unknown')}")
+            log.info(f"🔍 Total Videos geholt mit Pagination: {len(all_items)}")
 
             videos = []
             items = all_items
-            print(f"🔍 Items in Response: {len(items)}")
+            log.info(f"🔍 Items in Response: {len(items)}")
 
             for item in items:
                 video_id = item['contentDetails']['videoId']
@@ -186,10 +212,10 @@ class YouTubeSummarizer:
                     'playlist_item_id': playlist_item_id
                 })
 
-            print(f"📊 API hat {len(videos)} Videos in Watch Later gefunden")
+            log.info(f"📊 API hat {len(videos)} Videos in Watch Later gefunden")
             return videos
         except Exception as e:
-            print(f"❌ Fehler beim Abrufen der Watch Later Liste: {e}")
+            log.error(f"❌ Fehler beim Abrufen der Watch Later Liste: {e}")
             import traceback
             traceback.print_exc()
             return []
@@ -198,10 +224,11 @@ class YouTubeSummarizer:
         """Remove a video from the playlist after successful processing"""
         try:
             self.youtube.playlistItems().delete(id=playlist_item_id).execute()
-            print(f"🗑️  Video aus Playlist entfernt: {title[:50]}...")
+            self._add_quota(50)  # playlistItems.delete = 50 units
+            log.info(f"🗑️  Video aus Playlist entfernt: {title[:50]}...")
             return True
         except Exception as e:
-            print(f"⚠️  Konnte Video nicht aus Playlist entfernen: {e}")
+            log.warning(f"⚠️  Konnte Video nicht aus Playlist entfernen: {e}")
             return False
 
     def get_transcript_rapidapi(self, video_id):
@@ -213,13 +240,13 @@ class YouTubeSummarizer:
         rapidapi_keys = [key.strip() for key in rapidapi_keys if key.strip()]
 
         if not rapidapi_keys:
-            print(f"❌ Keine RapidAPI Keys konfiguriert")
+            log.error(f"❌ Keine RapidAPI Keys konfiguriert")
             return None
 
         # Try each API key in rotation
         for i, api_key in enumerate(rapidapi_keys):
             try:
-                print(f"🔄 Versuche RapidAPI (Key {i+1}/{len(rapidapi_keys)})...")
+                log.info(f"🔄 Versuche RapidAPI (Key {i+1}/{len(rapidapi_keys)})...")
 
                 # Use YT API endpoint for subtitles/captions
                 url = "https://yt-api.p.rapidapi.com/subtitles"
@@ -246,7 +273,7 @@ class YouTubeSummarizer:
 
                             # Check if we have a URL to fetch transcript from
                             if 'url' in subtitle_track:
-                                print(f"🔄 Lade Transkript von URL...")
+                                log.info(f"🔄 Lade Transkript von URL...")
                                 try:
                                     transcript_response = requests.get(subtitle_track['url'], timeout=30)
                                     if transcript_response.status_code == 200:
@@ -264,13 +291,13 @@ class YouTubeSummarizer:
                                         if texts:
                                             full_text = ' '.join(texts)
                                         else:
-                                            print(f"❌ RapidAPI: Keine Texte in XML gefunden")
+                                            log.error(f"❌ RapidAPI: Keine Texte in XML gefunden")
                                             continue
                                     else:
-                                        print(f"❌ RapidAPI: URL request failed: {transcript_response.status_code}")
+                                        log.error(f"❌ RapidAPI: URL request failed: {transcript_response.status_code}")
                                         continue
                                 except Exception as url_error:
-                                    print(f"❌ RapidAPI: Fehler beim Laden von URL: {url_error}")
+                                    log.error(f"❌ RapidAPI: Fehler beim Laden von URL: {url_error}")
                                     continue
 
                             # Fallback: Check for direct text/segments (old format)
@@ -279,20 +306,20 @@ class YouTubeSummarizer:
                             elif 'segments' in subtitle_track:
                                 full_text = ' '.join([seg.get('text', '') for seg in subtitle_track['segments']])
                             else:
-                                print(f"❌ RapidAPI: Unbekanntes Subtitles Format")
-                                print(f"Subtitle keys: {list(subtitle_track.keys())}")
+                                log.error(f"❌ RapidAPI: Unbekanntes Subtitles Format")
+                                log.info(f"Subtitle keys: {list(subtitle_track.keys())}")
                                 continue
                         elif 'text' in data:
                             full_text = data['text']
                         else:
-                            print(f"❌ RapidAPI: Kein Transkript in Response gefunden")
-                            print(f"Response keys: {list(data.keys())}")
+                            log.error(f"❌ RapidAPI: Kein Transkript in Response gefunden")
+                            log.info(f"Response keys: {list(data.keys())}")
                             continue
                     elif isinstance(data, list) and len(data) > 0:
                         # If it's an array of text segments
                         full_text = ' '.join([item.get('text', str(item)) for item in data])
                     else:
-                        print(f"❌ RapidAPI: Unexpected response format: {type(data)}")
+                        log.error(f"❌ RapidAPI: Unexpected response format: {type(data)}")
                         continue
 
                     # Clean up extra whitespace
@@ -300,29 +327,29 @@ class YouTubeSummarizer:
                     full_text = re.sub(r'\s+', ' ', full_text).strip()
 
                     if full_text:
-                        print(f"✅ Transkript via RapidAPI erhalten: {len(full_text)} Zeichen")
+                        log.info(f"✅ Transkript via RapidAPI erhalten: {len(full_text)} Zeichen")
                         return full_text
                     else:
-                        print(f"❌ RapidAPI: Transkript ist leer")
+                        log.error(f"❌ RapidAPI: Transkript ist leer")
                         continue
 
                 elif response.status_code == 429:
-                    print(f"⚠️  RapidAPI Key {i+1} hat Rate Limit erreicht, versuche nächsten...")
+                    log.warning(f"⚠️  RapidAPI Key {i+1} hat Rate Limit erreicht, versuche nächsten...")
                     continue
                 elif response.status_code == 403:
-                    print(f"⚠️  RapidAPI Key {i+1}: Nicht für diese API subscribed")
+                    log.warning(f"⚠️  RapidAPI Key {i+1}: Nicht für diese API subscribed")
                     continue
                 else:
-                    print(f"❌ RapidAPI Error {response.status_code}: {response.text[:100]}")
+                    log.error(f"❌ RapidAPI Error {response.status_code}: {response.text[:100]}")
                     continue
 
             except Exception as e:
-                print(f"❌ RapidAPI Fehler mit Key {i+1}: {e}")
+                log.error(f"❌ RapidAPI Fehler mit Key {i+1}: {e}")
                 import traceback
                 traceback.print_exc()
                 continue
 
-        print(f"❌ Alle RapidAPI Keys erschöpft")
+        log.error(f"❌ Alle RapidAPI Keys erschöpft")
         return None
 
     def get_transcript(self, video_id):
@@ -332,7 +359,7 @@ class YouTubeSummarizer:
 
         # PRIMARY: Try youtube-transcript-api (free, no rate limits)
         try:
-            print(f"🔍 Versuche Transkript für Video {video_id} abzurufen...")
+            log.info(f"🔍 Versuche Transkript für Video {video_id} abzurufen...")
 
             # Use the NEW API (v1.2+) with proper instantiation
             ytt_api = YouTubeTranscriptApi()
@@ -341,13 +368,13 @@ class YouTubeSummarizer:
             try:
                 fetched_transcript = ytt_api.fetch(video_id, languages=['de', 'en'])
                 lang_name = fetched_transcript.language
-                print(f"📥 Transkript gefunden ({lang_name})...")
+                log.info(f"📥 Transkript gefunden ({lang_name})...")
 
                 # Convert FetchedTranscript to raw data (list of dicts)
                 transcript_list = fetched_transcript.to_raw_data()
 
             except NoTranscriptFound:
-                print(f"⚠️  youtube-transcript-api: Kein Transkript in DE/EN gefunden, versuche RapidAPI...")
+                log.warning(f"⚠️  youtube-transcript-api: Kein Transkript in DE/EN gefunden, versuche RapidAPI...")
                 return self.get_transcript_rapidapi(video_id)
 
             # Combine all transcript segments
@@ -358,30 +385,30 @@ class YouTubeSummarizer:
             full_text = re.sub(r'\s+', ' ', full_text).strip()
 
             if not full_text:
-                print(f"⚠️  Transkript ist leer, versuche RapidAPI...")
+                log.warning(f"⚠️  Transkript ist leer, versuche RapidAPI...")
                 return self.get_transcript_rapidapi(video_id)
 
-            print(f"✅ Transkript verarbeitet: {len(full_text)} Zeichen")
+            log.info(f"✅ Transkript verarbeitet: {len(full_text)} Zeichen")
             return full_text
 
         except TranscriptsDisabled:
-            print(f"⚠️  Transkripte deaktiviert via youtube-transcript-api, versuche RapidAPI...")
+            log.warning(f"⚠️  Transkripte deaktiviert via youtube-transcript-api, versuche RapidAPI...")
             return self.get_transcript_rapidapi(video_id)
 
         except NoTranscriptFound:
-            print(f"⚠️  Kein Transkript via youtube-transcript-api, versuche RapidAPI...")
+            log.warning(f"⚠️  Kein Transkript via youtube-transcript-api, versuche RapidAPI...")
             return self.get_transcript_rapidapi(video_id)
 
         except Exception as e:
             error_msg = str(e)
             if "no longer available" in error_msg or "VideoUnavailable" in str(type(e)):
-                print(f"⚠️  Video nicht verfügbar via youtube-transcript-api, versuche RapidAPI...")
+                log.warning(f"⚠️  Video nicht verfügbar via youtube-transcript-api, versuche RapidAPI...")
                 return self.get_transcript_rapidapi(video_id)
             else:
-                print(f"❌ Unerwarteter Fehler: {e}")
+                log.error(f"❌ Unerwarteter Fehler: {e}")
                 import traceback
                 traceback.print_exc()
-                print(f"⚠️  Versuche RapidAPI als Fallback...")
+                log.warning(f"⚠️  Versuche RapidAPI als Fallback...")
                 return self.get_transcript_rapidapi(video_id)
     
     def calculate_max_tokens(self, title):
@@ -444,7 +471,7 @@ Beispiel-Output:
         for attempt in range(max_retries):
             try:
                 message = self.claude_client.messages.create(
-                    model="claude-sonnet-4-20250514",
+                    model=self.claude_model,
                     max_tokens=2000,
                     messages=[{"role": "user", "content": prompt}]
                 )
@@ -454,10 +481,10 @@ Beispiel-Output:
                 if "overloaded" in error_str.lower() or "529" in error_str:
                     if attempt < max_retries - 1:
                         wait_time = base_delay * (2 ** attempt)
-                        print(f"⚠️ Claude API überlastet. Warte {wait_time}s...")
+                        log.warning(f"⚠️ Claude API überlastet. Warte {wait_time}s...")
                         time.sleep(wait_time)
                         continue
-                print(f"❌ Bullet-Summary fehlgeschlagen: {e}")
+                log.error(f"❌ Bullet-Summary fehlgeschlagen: {e}")
                 return (False, "")
 
     def summarize_with_claude(self, title, transcript):
@@ -471,11 +498,11 @@ Beispiel-Output:
         import re
 
         # STEP 1: Create quick bullet-point summary with emojis
-        print("📝 Erstelle Quick-Scan (Bullet-Points)...")
+        log.info("📝 Erstelle Quick-Scan (Bullet-Points)...")
         bullet_success, bullet_summary = self.create_bullet_summary(title, transcript)
 
         # STEP 2: Create detailed summary
-        print("📄 Erstelle detaillierte Zusammenfassung...")
+        log.info("📄 Erstelle detaillierte Zusammenfassung...")
 
         # Extrahiere Zahlen aus dem Titel um zu prüfen ob es ein Listen-Video ist
         numbers = re.findall(r'\b(\d+)\b', title)
@@ -555,7 +582,7 @@ Die Strategien zeigen, dass kleine Änderungen große Wirkung haben können...
 
         # Dynamische Token-Berechnung basierend auf Titel
         max_tokens = self.calculate_max_tokens(title)
-        print(f"🎯 Max Tokens für '{title}': {max_tokens}")
+        log.info(f"🎯 Max Tokens für '{title}': {max_tokens}")
 
         # Retry-Logik mit exponential backoff für Overloaded Errors
         max_retries = 3
@@ -563,9 +590,8 @@ Die Strategien zeigen, dass kleine Änderungen große Wirkung haben können...
 
         for attempt in range(max_retries):
             try:
-                # Nutze Claude Sonnet 4.5 (neueste Version)
                 message = self.claude_client.messages.create(
-                    model="claude-sonnet-4-20250514",  # Claude Sonnet 4.5
+                    model=self.claude_model,
                     max_tokens=max_tokens,
                     messages=[
                         {"role": "user", "content": prompt}
@@ -596,17 +622,16 @@ AUSFÜHRLICHE ZUSAMMENFASSUNG
                 if "overloaded" in error_str.lower() or "529" in error_str:
                     if attempt < max_retries - 1:
                         wait_time = base_delay * (2 ** attempt)  # Exponential backoff
-                        print(f"⚠️ Claude API überlastet (529). Warte {wait_time} Sekunden vor Retry {attempt + 1}/{max_retries}...")
+                        log.warning(f"⚠️ Claude API überlastet (529). Warte {wait_time} Sekunden vor Retry {attempt + 1}/{max_retries}...")
                         time.sleep(wait_time)
                         continue
                     else:
-                        print(f"❌ Claude API überlastet nach {max_retries} Versuchen")
+                        log.error(f"❌ Claude API überlastet nach {max_retries} Versuchen")
                         return (False, f"Zusammenfassung konnte nicht erstellt werden. Claude API ist überlastet. Bitte später erneut versuchen.")
 
-                # For other errors, try fallback model
-                print(f"❌ Fehler bei Claude Sonnet 4: {e}")
+                log.error(f"❌ Fehler bei {self.claude_model}: {e}")
                 try:
-                    print("🔄 Versuche mit 'claude-sonnet-4-latest'...")
+                    log.info("🔄 Versuche mit 'claude-sonnet-4-latest'...")
                     message = self.claude_client.messages.create(
                         model="claude-sonnet-4-latest",
                         max_tokens=max_tokens,
@@ -632,7 +657,7 @@ AUSFÜHRLICHE ZUSAMMENFASSUNG
 
                     return (True, combined_summary)
                 except Exception as e2:
-                    print(f"❌ Fallback fehlgeschlagen: {e2}")
+                    log.error(f"❌ Fallback fehlgeschlagen: {e2}")
                     return (False, f"Zusammenfassung konnte nicht erstellt werden. API Fehler: {e}")
     
     def is_recently_added(self, added_at_str, days=7):
@@ -646,7 +671,7 @@ AUSFÜHRLICHE ZUSAMMENFASSUNG
             age = now - added_at
             return age <= timedelta(days=days)
         except Exception as e:
-            print(f"⚠️  Konnte Datum nicht parsen: {e}")
+            log.warning(f"⚠️  Konnte Datum nicht parsen: {e}")
             return False
 
     def markdown_to_html(self, text):
@@ -743,189 +768,251 @@ AUSFÜHRLICHE ZUSAMMENFASSUNG
                 server.login(self.email_from, self.email_password)
                 server.send_message(msg)
 
-            print(f"✅ Email gesendet für: {video_title}")
+            log.info(f"✅ Email gesendet für: {video_title}")
             return True
 
         except Exception as e:
-            print(f"❌ Fehler beim Email-Versand: {e}")
+            log.error(f"❌ Fehler beim Email-Versand: {e}")
             return False
     
+    def write_worker_status(self, videos_in_queue=0):
+        """Write worker status for health endpoint"""
+        status = {
+            'last_run': datetime.now().isoformat(),
+            'videos_in_queue': videos_in_queue,
+            'alive': True
+        }
+        status_file = Path('/data/worker_status.json')
+        status_file.parent.mkdir(parents=True, exist_ok=True)
+        with open(status_file, 'w') as f:
+            json.dump(status, f)
+
     def process_new_videos(self):
         """Main processing loop"""
-        print(f"\n🔍 Prüfe Watch Later Liste... ({datetime.now().strftime('%H:%M:%S')})")
+        log.info(f"\n🔍 Prüfe Watch Later Liste... ({datetime.now().strftime('%H:%M:%S')})")
+
+        if not self._quota_available():
+            log.warning("⚠️  YouTube API quota exhausted for today, skipping processing")
+            self.write_worker_status(videos_in_queue=0)
+            return
 
         videos = self.get_watch_later_videos()
-        print(f"📋 Bereits verarbeitete Videos: {len(self.processed_videos)}")
+        processed_count = database.count_videos()
+        log.info(f"📋 Bereits verarbeitete Videos: {processed_count}")
 
         # Filter videos: Nur noch nicht verarbeitete Videos
         videos_to_process = []
         for v in videos:
-            is_new = v['id'] not in self.processed_videos
+            is_new = not database.is_processed(v['id'])
             is_recent = self.is_recently_added(v['added_at'], days=7)
 
-            print(f"🔍 Video: {v['title'][:50]}... | Neu: {is_new} | Kürzlich: {is_recent} | Datum: {v['added_at']}")
+            log.info(f"🔍 Video: {v['title'][:50]}... | Neu: {is_new} | Kürzlich: {is_recent} | Datum: {v['added_at']}")
 
-            # Nur Videos verarbeiten die NOCH NICHT verarbeitet wurden
             if is_new:
                 videos_to_process.append(v)
                 if not is_recent:
-                    print(f"⚠️  Video ist älter als 7 Tage, wird trotzdem verarbeitet: {v['title'][:50]}...")
+                    log.warning(f"⚠️  Video ist älter als 7 Tage, wird trotzdem verarbeitet: {v['title'][:50]}...")
 
         if not videos_to_process:
-            print("✨ Keine neuen oder kürzlich hinzugefügten Videos gefunden")
+            log.info("✨ Keine neuen oder kürzlich hinzugefügten Videos gefunden")
+            self.write_worker_status(videos_in_queue=0)
             return
 
-        print(f"📹 {len(videos_to_process)} Videos zu verarbeiten!")
+        log.info(f"📹 {len(videos_to_process)} Videos zu verarbeiten!")
+        self.write_worker_status(videos_in_queue=len(videos_to_process))
 
         for video in videos_to_process:
             video_id = video['id']
             title = video['title']
 
-            print(f"\n▶️  Verarbeite: {title}")
+            log.info(f"\n▶️  Verarbeite: {title}")
 
             # Get transcript
             transcript = self.get_transcript(video_id)
             if not transcript:
-                print(f"⏭️  Überspringe (kein Transkript)")
-                # Videos ohne Transkript permanent als verarbeitet markieren (nicht wiederholbar)
-                self.processed_videos[video_id] = {
-                    'title': title,
-                    'channel': video.get('channel', 'Unknown'),
-                    'thumbnail': video.get('thumbnail', f'https://i.ytimg.com/vi/{video_id}/mqdefault.jpg'),
-                    'processed_at': datetime.now().isoformat(),
-                    'added_at': video.get('added_at', ''),
-                    'transcript': '',
-                    'summary': 'Kein Transkript verfügbar',
-                    'status': 'active'
-                }
-                self.save_state()
+                log.info(f"⏭️  Überspringe (kein Transkript)")
+                database.save_video(
+                    video_id,
+                    title=title,
+                    channel=video.get('channel', 'Unknown'),
+                    thumbnail=f'https://i.ytimg.com/vi/{video_id}/mqdefault.jpg',
+                    processed_at=datetime.now().isoformat(),
+                    added_at=video.get('added_at', ''),
+                    playlist_item_id=video.get('playlist_item_id', ''),
+                    transcript='',
+                    summary='Kein Transkript verfuegbar',
+                    status='active',
+                    retry_count=1,
+                    retry_after=(datetime.now() + timedelta(days=7)).isoformat(),
+                )
                 continue
 
             # Create summary
-            print("🤖 Erstelle Zusammenfassung mit Claude...")
+            log.info("🤖 Erstelle Zusammenfassung mit Claude...")
             success, summary = self.summarize_with_claude(title, transcript)
 
             if not success:
-                print(f"⚠️  Zusammenfassung fehlgeschlagen. Video wird beim nächsten Durchlauf erneut versucht.")
-                # Video NICHT als verarbeitet markieren, damit es beim nächsten Check erneut versucht wird
-                # Delay between videos to avoid rate limiting
-                print("⏳ Warte 45 Sekunden um Rate Limiting zu vermeiden...")
+                log.warning(f"⚠️  Zusammenfassung fehlgeschlagen. Video wird beim nächsten Durchlauf erneut versucht.")
+                log.info("⏳ Warte 45 Sekunden um Rate Limiting zu vermeiden...")
                 time.sleep(45)
                 continue
 
             # Send email only if summarization succeeded
             if self.send_email(title, video_id, summary):
-                # Nur bei erfolgreichem Versand als verarbeitet markieren
-                self.processed_videos[video_id] = {
-                    'title': title,
-                    'channel': video.get('channel', 'Unknown'),
-                    'thumbnail': video.get('thumbnail', f'https://i.ytimg.com/vi/{video_id}/mqdefault.jpg'),
-                    'processed_at': datetime.now().isoformat(),
-                    'added_at': video.get('added_at', ''),
-                    'transcript': transcript,
-                    'summary': summary,
-                    'status': 'active'
-                }
-                self.save_state()
-                print(f"✅ Video erfolgreich verarbeitet und als 'processed' markiert")
+                database.save_video(
+                    video_id,
+                    title=title,
+                    channel=video.get('channel', 'Unknown'),
+                    thumbnail=f'https://i.ytimg.com/vi/{video_id}/mqdefault.jpg',
+                    processed_at=datetime.now().isoformat(),
+                    added_at=video.get('added_at', ''),
+                    playlist_item_id=video.get('playlist_item_id', ''),
+                    transcript=transcript,
+                    summary=summary,
+                    status='active',
+                )
+                log.info(f"✅ Video erfolgreich verarbeitet und als 'processed' markiert")
 
-                # Video aus der Playlist entfernen nach erfolgreicher Verarbeitung
                 if video.get('playlist_item_id'):
                     self.remove_from_playlist(video['playlist_item_id'], title)
             else:
-                print(f"⚠️  Email-Versand fehlgeschlagen. Video wird beim nächsten Durchlauf erneut versucht.")
+                log.warning(f"⚠️  Email-Versand fehlgeschlagen. Video wird beim nächsten Durchlauf erneut versucht.")
 
-            # Delay between videos to avoid rate limiting
-            print("⏳ Warte 45 Sekunden um Rate Limiting zu vermeiden...")
-            time.sleep(45)  # Erhöht auf 45s um API-Überlastung zu vermeiden
-    
+            log.info("⏳ Warte 45 Sekunden um Rate Limiting zu vermeiden...")
+            time.sleep(45)
+
+        self.write_worker_status(videos_in_queue=0)
+
+        # Process retryable videos (failed transcripts that are due for retry)
+        self.process_retryable_videos()
+
+    def process_retryable_videos(self):
+        """Retry transcript fetching for videos that previously failed."""
+        retryable = database.get_retryable_videos()
+        if not retryable:
+            return
+
+        log.info(f"🔄 {len(retryable)} Videos für Transcript-Retry gefunden")
+
+        for video in retryable:
+            video_id = video['id']
+            title = video.get('title', 'Unknown')
+            retry_count = video.get('retry_count', 0)
+
+            log.info(f"🔄 Retry {retry_count + 1}/3 für: {title[:50]}...")
+
+            transcript = self.get_transcript(video_id)
+            if not transcript:
+                new_count = retry_count + 1
+                if new_count >= 3:
+                    log.warning(f"⚠️  Endgültig kein Transkript nach 3 Versuchen: {title[:50]}")
+                    database.save_video(video_id, retry_count=new_count, retry_after=None)
+                else:
+                    next_retry = (datetime.now() + timedelta(days=7)).isoformat()
+                    database.save_video(video_id, retry_count=new_count, retry_after=next_retry)
+                continue
+
+            # Got transcript this time - create summary
+            log.info("🤖 Erstelle Zusammenfassung mit Claude...")
+            success, summary = self.summarize_with_claude(title, transcript)
+
+            if success:
+                database.save_video(
+                    video_id,
+                    transcript=transcript,
+                    summary=summary,
+                    retry_count=0,
+                    retry_after=None,
+                )
+                log.info(f"✅ Retry erfolgreich für: {title[:50]}")
+
+                # Send email for newly summarized video
+                self.send_email(title, video_id, summary)
+            else:
+                log.warning(f"⚠️  Zusammenfassung fehlgeschlagen bei Retry: {title[:50]}")
+
+            time.sleep(45)
+
     def backfill_existing_videos(self):
         """Re-process all existing videos to add summaries and transcripts (without sending emails)"""
-        print("\n🔄 Starte Nachbearbeitung aller bereits verarbeiteten Videos...")
-        print("📧 E-Mails werden NICHT erneut versendet")
-        print("-" * 50)
+        log.info("\n🔄 Starte Nachbearbeitung aller bereits verarbeiteten Videos...")
+        log.info("📧 E-Mails werden NICHT erneut versendet")
+        log.info("-" * 50)
 
         # Get all videos from playlist
         all_videos = self.get_watch_later_videos()
 
-        # Filter to only videos that are already marked as processed
-        videos_to_backfill = [v for v in all_videos if v['id'] in self.processed_videos]
+        # Filter to only videos that are already in the database
+        videos_to_backfill = [v for v in all_videos if database.is_processed(v['id'])]
 
-        print(f"📹 {len(videos_to_backfill)} Videos gefunden zum Nachbearbeiten")
+        log.info(f"📹 {len(videos_to_backfill)} Videos gefunden zum Nachbearbeiten")
 
         for i, video in enumerate(videos_to_backfill, 1):
             video_id = video['id']
             title = video['title']
 
             # Skip if we already have complete data
-            if self.processed_videos[video_id].get('summary') and self.processed_videos[video_id].get('transcript'):
-                print(f"⏭️  [{i}/{len(videos_to_backfill)}] Überspringe (bereits vollständig): {title[:50]}...")
+            existing = database.get_video(video_id)
+            if existing and existing.get('summary') and existing.get('transcript'):
+                log.info(f"⏭️  [{i}/{len(videos_to_backfill)}] Überspringe (bereits vollständig): {title[:50]}...")
                 continue
 
-            print(f"\n▶️  [{i}/{len(videos_to_backfill)}] Verarbeite: {title}")
+            log.info(f"\n▶️  [{i}/{len(videos_to_backfill)}] Verarbeite: {title}")
 
-            # Get transcript
             transcript = self.get_transcript(video_id)
             if not transcript:
-                print(f"⏭️  Kein Transkript verfügbar")
-                self.processed_videos[video_id] = {
-                    'title': title,
-                    'channel': video.get('channel', 'Unknown'),
-                    'thumbnail': video.get('thumbnail', f'https://i.ytimg.com/vi/{video_id}/mqdefault.jpg'),
-                    'processed_at': self.processed_videos[video_id].get('processed_at', datetime.now().isoformat()),
-                    'added_at': video.get('added_at', ''),
-                    'transcript': '',
-                    'summary': 'Kein Transkript verfügbar',
-                    'status': self.processed_videos[video_id].get('status', 'active')
-                }
-                self.save_state()
+                log.info(f"⏭️  Kein Transkript verfügbar")
+                database.save_video(
+                    video_id,
+                    title=title,
+                    channel=video.get('channel', 'Unknown'),
+                    thumbnail=f'https://i.ytimg.com/vi/{video_id}/mqdefault.jpg',
+                    added_at=video.get('added_at', ''),
+                    transcript='',
+                    summary='Kein Transkript verfuegbar',
+                )
                 continue
 
-            # Create summary
-            print("🤖 Erstelle Zusammenfassung mit Claude...")
+            log.info("🤖 Erstelle Zusammenfassung mit Claude...")
             success, summary = self.summarize_with_claude(title, transcript)
 
             if not success:
-                print(f"⚠️  Zusammenfassung fehlgeschlagen, überspringe dieses Video")
+                log.warning(f"⚠️  Zusammenfassung fehlgeschlagen, überspringe dieses Video")
                 time.sleep(45)
                 continue
 
-            # Save data (WITHOUT sending email)
-            self.processed_videos[video_id] = {
-                'title': title,
-                'channel': video.get('channel', 'Unknown'),
-                'thumbnail': video.get('thumbnail', f'https://i.ytimg.com/vi/{video_id}/mqdefault.jpg'),
-                'processed_at': self.processed_videos[video_id].get('processed_at', datetime.now().isoformat()),
-                'added_at': video.get('added_at', ''),
-                'transcript': transcript,
-                'summary': summary,
-                'status': self.processed_videos[video_id].get('status', 'active')
-            }
-            self.save_state()
-            print(f"✅ Daten gespeichert (keine E-Mail versendet)")
+            database.save_video(
+                video_id,
+                title=title,
+                channel=video.get('channel', 'Unknown'),
+                thumbnail=f'https://i.ytimg.com/vi/{video_id}/mqdefault.jpg',
+                added_at=video.get('added_at', ''),
+                transcript=transcript,
+                summary=summary,
+            )
+            log.info(f"✅ Daten gespeichert (keine E-Mail versendet)")
 
-            # Delay between videos to avoid rate limiting
             if i < len(videos_to_backfill):
-                print("⏳ Warte 45 Sekunden um Rate Limiting zu vermeiden...")
+                log.info("⏳ Warte 45 Sekunden um Rate Limiting zu vermeiden...")
                 time.sleep(45)
 
-        print("\n✅ Nachbearbeitung abgeschlossen!")
+        log.info("\n✅ Nachbearbeitung abgeschlossen!")
 
     def run(self):
         """Main run loop"""
-        print("🚀 YouTube Playlist Summarizer gestartet!")
-        print(f"📺 Playlist ID: {self.playlist_id}")
-        print(f"⏰ Prüfintervall: {self.check_interval} Minuten")
-        print(f"📧 Emails an: {self.email_to}")
-        print("-" * 50)
+        log.info("🚀 YouTube Playlist Summarizer gestartet!")
+        log.info(f"📺 Playlist ID: {self.playlist_id}")
+        log.info(f"⏰ Prüfintervall: {self.check_interval} Minuten")
+        log.info(f"📧 Emails an: {self.email_to}")
+        log.info("-" * 50)
 
         while True:
             try:
                 self.process_new_videos()
             except Exception as e:
-                print(f"❌ Unerwarteter Fehler: {e}")
+                log.error(f"❌ Unerwarteter Fehler: {e}")
 
-            print(f"\n💤 Warte {self.check_interval} Minuten bis zum nächsten Check...")
+            log.info(f"\n💤 Warte {self.check_interval} Minuten bis zum nächsten Check...")
             time.sleep(self.check_interval * 60)
 
 

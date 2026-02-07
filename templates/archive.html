@@ -30,7 +30,7 @@
                         <div class="video-title">{{ video.title }}</div>
                         <div class="video-meta">
                             {{ video.channel }}<br>
-                            <small>{{ video.processed_at }}</small>
+                            <small>{{ video.added_at or video.processed_at }}</small>
                         </div>
                         {% if video.summary %}
                         <div class="video-summary">

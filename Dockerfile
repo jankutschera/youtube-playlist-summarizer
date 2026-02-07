@@ -12,6 +12,10 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy application files
 COPY youtube_summarizer.py .
 COPY web_app.py .
+COPY database.py .
+COPY migrate_to_sqlite.py .
+COPY supervisord.conf .
+COPY start.sh .
 
 # Copy templates and static directories
 COPY templates/ ./templates/
@@ -20,5 +24,5 @@ COPY static/ ./static/
 # Create data directory for state persistence
 RUN mkdir -p /data
 
-# Run the application
-CMD ["python", "-u", "youtube_summarizer.py"]
+# Run the application via supervisord
+CMD ["bash", "start.sh"]
