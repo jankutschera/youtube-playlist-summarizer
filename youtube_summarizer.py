@@ -5,6 +5,7 @@ Checks your Watch Later playlist and sends email summaries of new videos
 """
 
 import os
+import re
 import time
 import json
 import logging
@@ -12,6 +13,8 @@ import smtplib
 import pickle
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+from email.mime.base import MIMEBase
+from email import encoders
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -45,7 +48,7 @@ class YouTubeSummarizer:
         self.smtp_port = int(os.getenv('SMTP_PORT', '587'))
         self.check_interval = int(os.getenv('CHECK_INTERVAL_MINUTES', '30'))
         self.playlist_id = os.getenv('PLAYLIST_ID', 'WL')  # Default: Watch Later
-        self.claude_model = os.getenv('CLAUDE_MODEL', 'claude-sonnet-4-5-20250929')
+        self.claude_model = os.getenv('CLAUDE_MODEL', 'claude-sonnet-4-6')
         
         # OAuth2 credentials files
         self.credentials_file = Path('/data/credentials.json')
@@ -721,19 +724,16 @@ AUSFÜHRLICHE ZUSAMMENFASSUNG
 
         return '\n'.join(html_lines)
 
-    def send_email(self, video_title, video_id, summary):
-        """Send email with summary"""
+    def send_email(self, video_title, video_id, summary, transcript=None):
+        """Send email with summary and optional transcript attachment"""
         try:
-            msg = MIMEMultipart('alternative')
+            msg = MIMEMultipart('mixed')
             msg['Subject'] = f"📺 YouTube Zusammenfassung: {video_title}"
             msg['From'] = self.email_from
             msg['To'] = self.email_to
 
             video_url = f"https://www.youtube.com/watch?v={video_id}"
-            # YouTube Thumbnail URL - maxresdefault für beste Qualität
             thumbnail_url = f"https://i.ytimg.com/vi/{video_id}/maxresdefault.jpg"
-
-            # Konvertiere Markdown zu HTML
             summary_html = self.markdown_to_html(summary)
 
             html = f"""
@@ -741,14 +741,11 @@ AUSFÜHRLICHE ZUSAMMENFASSUNG
               <body style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; background-color: #f9f9f9;">
                 <div style="background: white; padding: 30px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
                   <h2 style="color: #FF0000; margin-top: 0;">📺 {video_title}</h2>
-
-                  <!-- Video Thumbnail -->
                   <div style="margin: 20px 0;">
                     <a href="{video_url}" style="display: block; text-decoration: none;">
                       <img src="{thumbnail_url}" alt="{video_title}" style="width: 100%; max-width: 600px; height: auto; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.15);">
                     </a>
                   </div>
-
                   <p><a href="{video_url}" style="color: #065fd4; text-decoration: none; font-weight: bold; font-size: 16px;">▶️ Video ansehen auf YouTube</a></p>
                   <hr style="border: none; border-top: 2px solid #eee; margin: 20px 0;">
                   <div style="line-height: 1.8; color: #333;">
@@ -761,7 +758,33 @@ AUSFÜHRLICHE ZUSAMMENFASSUNG
             </html>
             """
 
-            msg.attach(MIMEText(html, 'html'))
+            html_part = MIMEMultipart('alternative')
+            html_part.attach(MIMEText(html, 'html'))
+            msg.attach(html_part)
+
+            # Attach transcript as .md file
+            md_lines = [
+                f"# {video_title}",
+                "",
+                f"**YouTube:** {video_url}",
+                "",
+                "---",
+                "",
+                "## Summary",
+                "",
+                summary,
+                "",
+            ]
+            if transcript:
+                md_lines.extend(["---", "", "## Transcript", "", transcript, ""])
+
+            md_content = "\n".join(md_lines)
+            attachment = MIMEBase('text', 'markdown')
+            attachment.set_payload(md_content.encode('utf-8'))
+            encoders.encode_base64(attachment)
+            safe_title = re.sub(r'[^\w\s-]', '', video_title)[:80].strip()
+            attachment.add_header('Content-Disposition', 'attachment', filename=f"{safe_title}.md")
+            msg.attach(attachment)
 
             with smtplib.SMTP(self.smtp_server, self.smtp_port) as server:
                 server.starttls()
@@ -858,7 +881,7 @@ AUSFÜHRLICHE ZUSAMMENFASSUNG
                 continue
 
             # Send email only if summarization succeeded
-            if self.send_email(title, video_id, summary):
+            if self.send_email(title, video_id, summary, transcript=transcript):
                 database.save_video(
                     video_id,
                     title=title,
@@ -927,7 +950,7 @@ AUSFÜHRLICHE ZUSAMMENFASSUNG
                 log.info(f"✅ Retry erfolgreich für: {title[:50]}")
 
                 # Send email for newly summarized video
-                self.send_email(title, video_id, summary)
+                self.send_email(title, video_id, summary, transcript=transcript)
             else:
                 log.warning(f"⚠️  Zusammenfassung fehlgeschlagen bei Retry: {title[:50]}")
 

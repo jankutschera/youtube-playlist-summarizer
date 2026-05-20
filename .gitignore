@@ -32,5 +32,8 @@ ENV/
 .DS_Store
 Thumbs.db
 
+# Separate product repo
+adhd-youtube-digest-worker/
+
 # Logs
 *.log

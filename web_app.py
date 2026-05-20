@@ -8,13 +8,14 @@ import os
 
 # Allow OAuth over HTTP for local development
 os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1'
+os.environ['OAUTHLIB_RELAX_TOKEN_SCOPE'] = '1'
 
 import json
 import logging
 import pickle
 import re
 from pathlib import Path
-from flask import Flask, render_template, redirect, url_for, session, request, jsonify
+from flask import Flask, render_template, redirect, url_for, session, request, jsonify, Response
 from markupsafe import escape
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import Flow
@@ -258,9 +259,60 @@ def video_detail(video_id):
 
 @app.route('/api/videos')
 def api_videos():
-    """API endpoint to get all videos"""
-    videos = database.get_videos(status=None, limit=10000)
+    """API endpoint to list videos (without transcript/summary for performance)"""
+    status = request.args.get('status', 'active')
+    if status == 'all':
+        status = None
+    limit = request.args.get('limit', 50, type=int)
+    offset = request.args.get('offset', 0, type=int)
+    videos = database.get_videos(status=status, limit=limit, offset=offset)
+    # Strip heavy fields for list view
+    for v in videos:
+        v.pop('transcript', None)
+        v.pop('summary', None)
     return jsonify(videos)
+
+
+@app.route('/api/video/<video_id>')
+def api_video_detail(video_id):
+    """API endpoint to get a single video with full summary and transcript"""
+    video = database.get_video(video_id)
+    if not video:
+        return jsonify({'error': 'Video not found'}), 404
+    return jsonify(video)
+
+
+@app.route('/api/video/<video_id>/download')
+def download_video_md(video_id):
+    """Download video transcript and summary as Markdown file"""
+    video = database.get_video(video_id)
+    if not video:
+        return "Video not found", 404
+
+    lines = [
+        f"# {video['title']}",
+        "",
+        f"**Channel:** {video.get('channel', 'Unknown')}",
+        f"**Added:** {video.get('added_at', 'N/A')}",
+        f"**YouTube:** https://youtube.com/watch?v={video['id']}",
+        "",
+    ]
+
+    if video.get('summary'):
+        lines.extend(["---", "", "## Summary", "", video['summary'], ""])
+
+    if video.get('transcript'):
+        lines.extend(["---", "", "## Transcript", "", video['transcript'], ""])
+
+    content = "\n".join(lines)
+    safe_title = re.sub(r'[^\w\s-]', '', video['title'])[:80].strip()
+    filename = f"{safe_title}.md"
+
+    return Response(
+        content,
+        mimetype='text/markdown',
+        headers={'Content-Disposition': f'attachment; filename="{filename}"'}
+    )
 
 
 @app.route('/api/status')
@@ -296,7 +348,14 @@ def api_search():
     if not query:
         return jsonify([])
 
-    results = database.search_videos(query, status='active')
+    status = request.args.get('status', 'active')
+    results = database.search_videos(query, status=status)
+    # Strip heavy fields, add snippet instead
+    for v in results:
+        v.pop('transcript', None)
+        summary = v.pop('summary', '') or ''
+        # Include first 200 chars of summary as snippet
+        v['summary_snippet'] = summary[:200] + '...' if len(summary) > 200 else summary
     return jsonify(results)
 
 

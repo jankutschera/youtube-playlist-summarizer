@@ -21,7 +21,7 @@ services:
     environment:
       # Claude API
       - CLAUDE_API_KEY=${CLAUDE_API_KEY}
-      - CLAUDE_MODEL=${CLAUDE_MODEL:-claude-sonnet-4-5-20250929}
+      - CLAUDE_MODEL=${CLAUDE_MODEL:-claude-sonnet-4-6}
 
       # Email Einstellungen
       - EMAIL_FROM=${EMAIL_FROM}

@@ -1,57 +1,73 @@
 # Session Log
 
 ## Projekt Status
-- **Letztes Update:** 2026-02-07
-- **Status:** Fully deployed to Synology NAS with SQLite, supervisord, gunicorn
+- **Letztes Update:** 2026-05-20
+- **Status:** Local YouTube Tool is live and MCP smoke-tested; Focus Digest is the separate multi-user product track
 
 ## Letzter Stand
 
+### Local YouTube Tool finalized (2026-05-20)
+- Scope clarified: "YouTube Tool" = personal/local MCP over `yt.lucia-allegra.com`; "Focus Digest" = separate multi-user Cloudflare Worker product.
+- Fixed `mcp_server.py` API requests by adding JSON `Accept` and a stable `User-Agent`; Python `urllib` was otherwise blocked with HTTP 403 by the live endpoint.
+- Fixed MCP dependency command from `--with mcp` to `--with mcp[cli]` in `~/.mcp.json` and `~/.local/bin/mcp-toggle`.
+- Smoke-tested live API:
+  - `/api/status`
+  - `/api/videos?limit=1&status=active`
+  - `/api/video/<id>`
+  - `/api/search?q=psychology`
+  - `/api/video/<id>/download`
+- Smoke-tested MCP stdio:
+  - `initialize`
+  - `tools/list`
+  - `tools/call get_stats`
+
+### MCP Server (2026-03-22)
+- Created `mcp_server.py` - MCP server exposing video database to AI agents
+- Tools: `search_videos`, `get_video_summary`, `list_recent_videos`, `get_stats`
+- Runs via `uv run --no-project --with 'mcp[cli]'` (no global install needed)
+- Registered globally in `~/.mcp.json` as `yt-summarizer`
+- Also added to `mcp-toggle` for per-project use
+- Improved API endpoints: `/api/videos` strips transcript/summary, `/api/video/<id>` returns full detail, `/api/search` returns summary snippets
+
+### Fixes (2026-02-28)
+- Fixed OAuth scope mismatch: added `OAUTHLIB_RELAX_TOKEN_SCOPE=1`
+- Cleaned up playlist: removed 36 already-summarized videos, processed 2 new ones
+- LAK tunnel token hardcoded in docker-compose.yml (was losing .env file)
+
 ### Deployment (2026-02-07)
 - Fixed Cloudflare Tunnel "LAK" (was down since Feb 2, no container existed)
-- Created `/volume1/docker/lak-tunnel/` with docker-compose.yml + .env for persistent tunnel management
+- Created `/volume1/docker/lak-tunnel/` with docker-compose.yml (token hardcoded)
 - Uploaded all changed files to NAS via scp
 - Rebuilt Docker image (new dependencies: gunicorn, supervisor)
 - Ran `migrate_to_sqlite.py` - 270 videos migrated from JSON to SQLite
 - Container running with supervisord managing web (gunicorn) + worker
-- Fixed supervisord.conf: added supervisorctl/rpcinterface sections for management
-- All endpoints verified: dashboard (200), /api/status (200), quota tracking active
 
-### Phase 1: Quick Wins (DONE)
-- Added gunicorn as production web server
-- Made Claude model configurable via `CLAUDE_MODEL` env var (default: claude-sonnet-4-5-20250929)
-- Removed redundant `youtube.readonly` OAuth scope
-- Fixed XSS: added `markupsafe.escape()` to `markdown_to_html` filter
-- Added `/api/status` health endpoint with worker status + quota info
-
-### Phase 2: SQLite Migration (DONE)
-- Created `database.py` with WAL mode, parameterized queries, all CRUD operations
-- Created `migrate_to_sqlite.py` one-time migration script (JSON -> SQLite)
-- Updated `youtube_summarizer.py` to use SQLite via database module (removed load_state/save_state)
-- Updated `web_app.py` to use SQLite (removed all JSON file I/O)
-- Updated templates to use `added_at or processed_at` for date display
-
-### Phase 3: Reliability (DONE)
-- Replaced all `print()` with structured `logging` (timestamps + levels)
-- Added transcript retry logic: failed transcripts retry 3x with 7-day intervals
-- Added supervisord for process management (web + worker with auto-restart)
-- Added YouTube API quota tracking with 80%/95% thresholds
+### Phase 1-3 (DONE)
+- gunicorn, configurable Claude model, XSS fix, health endpoint
+- SQLite with WAL mode, migration from JSON
+- Structured logging, transcript retry, supervisord, quota tracking
 
 ## Infrastructure
 
-### Cloudflare Tunnels on NAS
-| Tunnel | Container | Status | Config |
-|--------|-----------|--------|--------|
-| LAK | `lak-tunnel` | healthy | `/volume1/docker/lak-tunnel/docker-compose.yml` |
-| health | `health-tunnel` | healthy | `/volume1/docker/health/docker-compose.yml` |
+### MCP Server
+- **Name:** `yt-summarizer`
+- **Config:** `~/.mcp.json` (global) + `mcp-toggle add yt-summarizer` (per-project)
+- **Command:** `uv run --no-project --with 'mcp[cli]' /Users/jankutschera/dev/youtube-summarizer-oauth2/mcp_server.py`
+- **API Base:** `https://yt.lucia-allegra.com/api`
 
-### LAK Tunnel Routes
-- `yt.lucia-allegra.com` -> localhost:8080
-- `service.lucia-allegra.com` -> localhost:80
-- `postiz.lucia-allegra.com` -> localhost:8100
-- `postiz-api.lucia-allegra.com` -> localhost:8101
-- `n8n.lucia-allegra.com` -> localhost:5678
-- `vektor.lucia-allegra.com` -> localhost:8103
-- `billing.truebrew-birdie.com` -> localhost:8082
+### API Endpoints
+| Endpoint | Purpose |
+|----------|---------|
+| `GET /api/videos?limit=N&status=active` | List videos (no transcript/summary) |
+| `GET /api/video/<id>` | Single video with full summary + transcript |
+| `GET /api/search?q=keyword` | Search with summary snippets |
+| `GET /api/status` | Worker status, quota, video counts |
+
+### Cloudflare Tunnels on NAS
+| Tunnel | Container | Config |
+|--------|-----------|--------|
+| LAK | `lak-tunnel` | `/volume1/docker/lak-tunnel/docker-compose.yml` (token hardcoded) |
+| health | `health-tunnel` | `/volume1/docker/health/docker-compose.yml` |
 
 ### NAS Access
 - SSH: `ssh nullergy` (192.168.188.50, user: admin)
@@ -59,24 +75,18 @@
 - SCP: needs `-O` flag for legacy protocol
 
 ## Nächste Schritte
-- [ ] Delete old OAuth token, re-authenticate at https://yt.lucia-allegra.com/login (scope changed)
-- [ ] Remove remaining ~30 processed videos from playlist
+- [ ] Restart/new agent session to load the corrected `yt-summarizer` MCP registration
+- [ ] Continue Focus Digest as separate multi-user product track
 - [ ] Monitor SQLite DB growth and worker retry behavior
 
 ## Files Changed
 | File | Action |
 |------|--------|
-| `requirements.txt` | Added gunicorn, supervisor |
-| `start.sh` | Now uses supervisord |
-| `docker-compose.yml` | Added CLAUDE_MODEL, volume mounts, healthcheck on /api/status, production REDIRECT_URI |
-| `Dockerfile` | Copies new files, CMD uses start.sh |
-| `youtube_summarizer.py` | SQLite, logging, retry, configurable model, quota tracking |
-| `web_app.py` | SQLite, logging, health endpoint, XSS fix |
-| `templates/dashboard.html` | Updated date display field |
-| `templates/archive.html` | Updated date display field |
-| **NEW:** `database.py` | SQLite abstraction layer |
-| **NEW:** `migrate_to_sqlite.py` | One-time JSON->SQLite migration |
-| **NEW:** `supervisord.conf` | Process management config (with supervisorctl support) |
+| `mcp_server.py` | Added request headers so MCP tool calls reach the live API reliably |
+| `web_app.py` | Improved API: `/api/videos` strips heavy fields, new `/api/video/<id>`, `/api/search` with snippets, OAuth scope fix |
+| **NEW:** `mcp_server.py` | MCP server for AI agent access to video database |
+| `~/.mcp.json` | `yt-summarizer` MCP globally, corrected to `mcp[cli]` |
+| `~/.local/bin/mcp-toggle` | `yt-summarizer` config corrected to `mcp[cli]` |
 
 ## Offene Fragen
 - None

@@ -180,11 +180,14 @@
             </a>
 
             <div class="video-actions-detail">
+                <a href="/api/video/{{ video.id }}/download" class="action-btn archive-btn" style="text-decoration: none;">
+                    Download .md
+                </a>
                 <button class="action-btn archive-btn" onclick="archiveVideo('{{ video.id }}')">
-                    📁 Archivieren
+                    Archivieren
                 </button>
                 <button class="action-btn remove-btn" onclick="removeVideo('{{ video.id }}')">
-                    🗑️ Entfernen
+                    Entfernen
                 </button>
             </div>
 
