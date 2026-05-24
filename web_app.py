@@ -14,7 +14,10 @@ import json
 import logging
 import pickle
 import re
+import smtplib
 from pathlib import Path
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 from flask import Flask, render_template, redirect, url_for, session, request, jsonify, Response
 from markupsafe import escape
 from google.oauth2.credentials import Credentials
@@ -38,6 +41,7 @@ SCOPES = ['https://www.googleapis.com/auth/youtube']
 CREDENTIALS_FILE = Path('/data/credentials.json')
 TOKEN_FILE = Path('/data/token.pickle')
 REDIRECT_URI = os.getenv('REDIRECT_URI', 'http://localhost:5000/oauth2callback')
+FOCUS_EMAIL_TOKEN = os.getenv('FOCUS_EMAIL_TOKEN', '')
 
 # Initialize database on import
 database.init_db()
@@ -339,6 +343,56 @@ def api_status():
             'date': quota_date,
         }
     })
+
+
+@app.route('/api/focus-email', methods=['POST'])
+def api_focus_email():
+    """Send Focus Digest email through the same SMTP path as Lucia summaries."""
+    expected = FOCUS_EMAIL_TOKEN.strip()
+    auth = request.headers.get('Authorization', '')
+    if not expected or auth != f'Bearer {expected}':
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    payload = request.get_json(silent=True) or {}
+    recipient = str(payload.get('to', '')).strip()
+    subject = str(payload.get('subject', '')).strip()
+    text = str(payload.get('text', '') or '')
+    html = str(payload.get('html', '') or '')
+
+    if not recipient or '@' not in recipient:
+        return jsonify({'error': 'Valid recipient is required'}), 400
+    if not subject:
+        return jsonify({'error': 'Subject is required'}), 400
+    if not text and not html:
+        return jsonify({'error': 'Email text or HTML is required'}), 400
+
+    email_from = os.getenv('EMAIL_FROM', '').strip()
+    email_password = os.getenv('EMAIL_PASSWORD', '').strip()
+    smtp_server = os.getenv('SMTP_SERVER', 'smtp.gmail.com')
+    smtp_port = int(os.getenv('SMTP_PORT', '587'))
+    if not email_from or not email_password:
+        return jsonify({'error': 'SMTP sender is not configured'}), 500
+
+    try:
+        msg = MIMEMultipart('alternative')
+        msg['Subject'] = subject
+        msg['From'] = email_from
+        msg['To'] = recipient
+        if text:
+            msg.attach(MIMEText(text, 'plain', 'utf-8'))
+        if html:
+            msg.attach(MIMEText(html, 'html', 'utf-8'))
+
+        with smtplib.SMTP(smtp_server, smtp_port) as server:
+            server.starttls()
+            server.login(email_from, email_password)
+            server.send_message(msg)
+
+        log.info(f"✅ Focus email sent to {recipient}: {subject}")
+        return jsonify({'success': True})
+    except Exception as e:
+        log.error(f"❌ Focus email failed: {e}")
+        return jsonify({'error': str(e)}), 502
 
 
 @app.route('/api/search')

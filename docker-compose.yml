@@ -27,6 +27,7 @@ services:
       - EMAIL_FROM=${EMAIL_FROM}
       - EMAIL_TO=${EMAIL_TO}
       - EMAIL_PASSWORD=${EMAIL_PASSWORD}
+      - FOCUS_EMAIL_TOKEN=${FOCUS_EMAIL_TOKEN}
 
       # SMTP Server (Gmail)
       - SMTP_SERVER=smtp.gmail.com
